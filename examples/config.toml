@@ -1,0 +1,29 @@
+schema_version = 1
+
+[workspace]
+root = "~/projects/workspaces"
+default_profile = "development"
+directory_template = "{{ .Workspace.Key }}"
+
+[repositories]
+refresh_on_start = false
+
+[[repositories.sources]]
+name = "projects"
+path = "~/projects"
+max_depth = 3
+exclude = ["workspaces/**", "**/node_modules/**", "**/.cache/**"]
+
+[worktree]
+driver = "worktrunk"
+executable = "wt"
+branch_template = "{{ .Workspace.Key }}"
+path_template = "{{ .Workspace.Path }}/{{ .Repo.Name }}"
+base_ref = "default"
+delete_branch_on_cleanup = false
+
+[ui]
+show_hidden = false
+
+[profiles.development]
+workspace_root = "~/projects/workspaces"

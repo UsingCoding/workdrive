@@ -1,0 +1,18 @@
+[tools]
+go = "1.26.3"
+
+[tasks.build]
+description = "Build the Workdrive CLI"
+run = "go build -o .build/workdrive ./cmd/workdrive"
+
+[tasks.lint]
+description = "Check formatting and run go vet"
+run = "test -z \"$(gofmt -l cmd internal)\" && go vet ./..."
+
+[tasks.test]
+description = "Run the complete automated test suite"
+run = "go test ./..."
+
+[tasks.fmt]
+description = "Format Go source files"
+run = "gofmt -w cmd internal"
