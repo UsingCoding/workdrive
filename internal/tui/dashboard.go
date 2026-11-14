@@ -363,14 +363,17 @@ func (d dashboard) View() string {
 		return d.wizard.View()
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "WORKDRIVE   %d workspaces   %d active   %d parked   filter: %s\n", len(d.items), d.count("active"), d.count("parked"), d.filter)
+	fmt.Fprintf(&b, "%s   %s   %s active   %s parked   %s\n\n",
+		accentStyle.Render("WORKDRIVE"), mutedStyle.Render(fmt.Sprintf("%d workspaces", len(d.items))),
+		successStyle.Render(fmt.Sprint(d.count("active"))), mutedStyle.Render(fmt.Sprint(d.count("parked"))),
+		accentStyle.Render("filter: "+d.filter))
 	fmt.Fprintf(&b, "%s\n", d.query.View())
 	if d.loading {
-		b.WriteString("Loading local state…\n")
+		b.WriteString(accentStyle.Render("Loading local state…") + "\n")
 	}
 	visible := d.visible()
 	if len(visible) == 0 {
-		b.WriteString("No matching workspaces. Press n to create one.\n")
+		b.WriteString(mutedStyle.Render("No matching workspaces.") + " " + helpLine("n create one"))
 	}
 	limit := d.height - 11
 	if limit < 1 {
@@ -385,11 +388,14 @@ func (d dashboard) View() string {
 	}
 	for i := start; i < start+limit; i++ {
 		w := visible[i]
-		pointer := "  "
-		if i == d.cursor {
-			pointer = "> "
+		row := fmt.Sprintf("%-22s %-9s %-9s %2d repos  %s", w.Key, w.State, w.ActualStatus, len(w.Resources), w.Name)
+		if i != d.cursor {
+			row = fmt.Sprintf("%s %s %s %s  %s", textStyle.Bold(true).Render(fmt.Sprintf("%-22s", w.Key)),
+				statusText(string(w.State))+strings.Repeat(" ", max(0, 9-len(w.State))),
+				statusText(string(w.ActualStatus))+strings.Repeat(" ", max(0, 9-len(w.ActualStatus))),
+				mutedStyle.Render(fmt.Sprintf("%2d repos", len(w.Resources))), w.Name)
 		}
-		fmt.Fprintf(&b, "%s%-22s %-9s %-9s %2d repos  %s\n", pointer, w.Key, w.State, w.ActualStatus, len(w.Resources), w.Name)
+		b.WriteString(listRow(row, i == d.cursor) + "\n")
 	}
 	if d.detail {
 		w := d.inspected
@@ -397,55 +403,51 @@ func (d dashboard) View() string {
 			w = d.current()
 		}
 		if w != nil {
-			fmt.Fprintf(&b, "\n%s — %s\nPath: %s\nProfile: %s · State: %s · Health: %s\n", w.Key, w.Name, w.Path, w.Profile, w.State, w.ActualStatus)
+			fmt.Fprintf(&b, "\n%s — %s\n%s %s\n%s %s · State: %s · Health: %s\n", accentStyle.Render(w.Key), textStyle.Render(w.Name), mutedStyle.Render("Path:"), textStyle.Render(w.Path), mutedStyle.Render("Profile:"), w.Profile, statusText(string(w.State)), statusText(string(w.ActualStatus)))
 			for _, r := range w.Resources {
-				fmt.Fprintf(&b, "  %s → %s\n    branch %s · %s\n", r.Source, r.Path, r.Branch, r.ActualStatus)
+				fmt.Fprintf(&b, "  %s → %s\n    branch %s · %s\n", mutedStyle.Render(r.Source), textStyle.Render(r.Path), accentStyle.Render(r.Branch), statusText(string(r.ActualStatus)))
 			}
 		}
 	}
 	if d.action == "pick-remove" {
 		if w := d.current(); w != nil {
-			b.WriteString("\nChoose worktree to remove:\n")
+			b.WriteString("\n" + warningStyle.Render("Choose worktree to remove:") + "\n")
 			for i, r := range w.Resources {
-				pointer := "  "
-				if i == d.removeCursor {
-					pointer = "> "
-				}
-				fmt.Fprintf(&b, "%s%s (%s)\n", pointer, r.Source, r.Path)
+				b.WriteString(listRow(fmt.Sprintf("%s (%s)", r.Source, r.Path), i == d.removeCursor) + "\n")
 			}
-			b.WriteString("↑/↓ select · Enter preview · Esc cancel\n")
+			b.WriteString(helpLine("↑/↓ select · Enter preview · Esc cancel"))
 		}
 	}
 	if d.confirmation != "" {
-		fmt.Fprintf(&b, "\n%s %s?\n", strings.ToUpper(d.confirmation), d.pending.Workspace.Key)
+		fmt.Fprintf(&b, "\n%s\n", dangerStyle.Render(fmt.Sprintf("%s %s?", strings.ToUpper(d.confirmation), d.pending.Workspace.Key)))
 		for _, r := range d.pending.Remove {
 			fmt.Fprintf(&b, "Delete worktree: %s\nPreserve branch: %s\n", r.Path, r.Branch)
 		}
 		for _, blocker := range d.pending.Blockers {
-			fmt.Fprintf(&b, "BLOCKED: %s\n", blocker)
+			fmt.Fprintf(&b, "%s\n", dangerStyle.Render("BLOCKED: "+blocker))
 		}
 		for _, warning := range d.pending.Warnings {
-			fmt.Fprintf(&b, "Warning: %s\n", warning)
+			fmt.Fprintf(&b, "%s\n", warningStyle.Render("Warning: "+warning))
 		}
 		if d.pending.Safe() {
-			b.WriteString("y confirm · n cancel\n")
+			b.WriteString(helpLine("y confirm · n cancel"))
 		} else {
-			b.WriteString("Esc cancel (approval disabled)\n")
+			b.WriteString(helpLine("Esc cancel (approval disabled)"))
 		}
 	}
 	if d.busy {
-		fmt.Fprintf(&b, "\nOperation in progress %s Esc requests cancellation.\n", strings.Repeat(".", 1+d.progress%3))
+		fmt.Fprintf(&b, "\n%s\n", accentStyle.Render(fmt.Sprintf("Operation in progress %s Esc requests cancellation.", strings.Repeat(".", 1+d.progress%3))))
 	}
 	if d.status != "" {
-		fmt.Fprintf(&b, "\n%s\n", d.status)
+		fmt.Fprintf(&b, "\n%s\n", accentStyle.Render(d.status))
 	}
 	for _, warning := range d.warnings[:min(2, len(d.warnings))] {
-		fmt.Fprintf(&b, "Warning: %s\n", warning)
+		fmt.Fprintf(&b, "%s\n", warningStyle.Render("Warning: "+warning))
 	}
 	if d.help {
-		b.WriteString("\n↑↓/jk select · / search · f filter · d details · n new · a add · p park · x cleanup · z remove repo · Enter switch · r refresh · q quit\n")
+		b.WriteString("\n" + helpLine("↑↓/jk select · / search · f filter · d details · n new · a add · p park · x cleanup · z remove repo · Enter switch · r refresh · q quit"))
 	}
-	b.WriteString("n new · Enter switch · d detail · a add · p park · x cleanup · z remove · r refresh · / search · f filter · ? help · q quit\n")
+	b.WriteString("\n" + helpLine("n new · Enter switch · d detail · a add · p park · x cleanup · z remove · r refresh · / search · f filter · ? help · q quit"))
 	return b.String()
 }
 func (d dashboard) count(state string) int {

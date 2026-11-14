@@ -457,21 +457,21 @@ func (w *wizard) selectRepo(path string, c app.RepositoryChoice) {
 func (w wizard) View() string {
 	var b strings.Builder
 	labels := []string{"Identity", "Repositories", "Worktrees", "Review", "Applying", "Result"}
-	fmt.Fprintf(&b, "Workdrive %s · %s\n\n", map[bool]string{true: "Add repositories", false: "New workspace"}[w.addKey != ""], labels[w.step])
+	fmt.Fprintf(&b, "%s · %s\n\n", accentStyle.Render("Workdrive "+map[bool]string{true: "Add repositories", false: "New workspace"}[w.addKey != ""]), accentStyle.Render(labels[w.step]))
 	switch w.step {
 	case 0:
 		for i, t := range w.fields {
 			marker := "  "
 			if i == w.focus {
-				marker = "> "
+				marker = accentStyle.Render("> ")
 			}
 			fmt.Fprintf(&b, "%s%s\n", marker, t.View())
 		}
-		b.WriteString("\nTab next field · Enter on Profile continues\n")
+		b.WriteString("\n" + helpLine("Tab next field · Enter on Profile continues"))
 	case 1:
 		fmt.Fprintf(&b, "%s · %d selected\n", w.search.View(), len(w.choices()))
 		if w.loading {
-			b.WriteString("Scanning local repositories…\n")
+			b.WriteString(accentStyle.Render("Scanning local repositories…") + "\n")
 		}
 		visible := w.visible()
 		if len(visible) == 0 {
@@ -494,13 +494,13 @@ func (w wizard) View() string {
 			if _, ok := w.selected[r.Path]; ok {
 				mark = "x"
 			}
-			pointer := "  "
-			if i == w.cursor {
-				pointer = "> "
+			row := fmt.Sprintf("[%s] %s — %s", mark, r.DisplayName, r.Path)
+			if mark == "x" && i != w.cursor {
+				row = successStyle.Render(row)
 			}
-			fmt.Fprintf(&b, "%s[%s] %s — %s\n", pointer, mark, r.DisplayName, r.Path)
+			b.WriteString(listRow(row, i == w.cursor) + "\n")
 		}
-		b.WriteString("\nSpace toggle · ↑/↓ move · Enter next · Ctrl+R refresh\n")
+		b.WriteString("\n" + helpLine("Space toggle · ↑/↓ move · Enter next · Ctrl+R refresh"))
 	case 2:
 		if len(w.order) == 0 {
 			b.WriteString("No worktrees selected. Press Enter to review the workspace.\n")
@@ -510,13 +510,13 @@ func (w wizard) View() string {
 			for i, t := range w.edits {
 				pointer := "  "
 				if w.focus == i {
-					pointer = "> "
+					pointer = accentStyle.Render("> ")
 				}
 				fmt.Fprintf(&b, "%s%s\n", pointer, t.View())
 			}
-			b.WriteString("Leave Branch / Destination empty for profile defaults. Base is a Git ref.\nAlt+←/→ previous/next repo · Enter on Destination next\n")
+			b.WriteString(mutedStyle.Render("Leave Branch / Destination empty for profile defaults. Base is a Git ref.") + "\n" + helpLine("Alt+←/→ previous/next repo · Enter on Destination next"))
 		}
-		b.WriteString("Ctrl+N review\n")
+		b.WriteString(helpLine("Ctrl+N review"))
 	case 3:
 		if w.plan.Workspace != nil {
 			p := w.plan
@@ -548,31 +548,38 @@ func (w wizard) View() string {
 				fmt.Fprintf(&b, "Existing worktrees remain unchanged: %d\n", len(p.Workspace.Resources))
 			}
 			for _, v := range p.Warnings {
-				fmt.Fprintf(&b, "Warning: %s\n", v)
+				fmt.Fprintf(&b, "%s\n", warningStyle.Render("Warning: "+v))
 			}
 			for _, v := range p.Blockers {
-				fmt.Fprintf(&b, "BLOCKED: %s\n", v)
+				fmt.Fprintf(&b, "%s\n", dangerStyle.Render("BLOCKED: "+v))
 			}
 			if p.Safe() {
-				b.WriteString("\nEnter/y confirm and apply · b/Ctrl+B back\n")
+				b.WriteString("\n" + helpLine("Enter/y confirm and apply · b/Ctrl+B back"))
 			} else {
-				b.WriteString("\nCannot apply while blocked · b/Ctrl+B back\n")
+				b.WriteString("\n" + dangerStyle.Render("Cannot apply while blocked") + " · " + helpLine("b/Ctrl+B back"))
 			}
 		}
 	case 4:
-		fmt.Fprintf(&b, "Applying changes in the background %s\nEsc requests cancellation; wait for the operation journal to settle.\n", strings.Repeat(".", 1+w.progress%3))
+		fmt.Fprintf(&b, "%s\n%s\n", accentStyle.Render(fmt.Sprintf("Applying changes in the background %s", strings.Repeat(".", 1+w.progress%3))), mutedStyle.Render("Esc requests cancellation; wait for the operation journal to settle."))
 	case 5:
-		b.WriteString("Enter to close.\n")
+		b.WriteString(helpLine("Enter to close."))
 	}
 	if w.status != "" {
-		fmt.Fprintf(&b, "\n%s\n", w.status)
+		style := accentStyle
+		if w.step == 5 {
+			style = successStyle
+			if w.err != nil {
+				style = dangerStyle
+			}
+		}
+		fmt.Fprintf(&b, "\n%s\n", style.Render(w.status))
 	}
 	if len(w.warnings) > 0 {
 		for _, v := range w.warnings[:min(3, len(w.warnings))] {
-			fmt.Fprintf(&b, "Warning: %s\n", v)
+			fmt.Fprintf(&b, "%s\n", warningStyle.Render("Warning: "+v))
 		}
 	}
-	b.WriteString("Ctrl+B back · Esc cancel\n")
+	b.WriteString(helpLine("Ctrl+B back · Esc cancel"))
 	return b.String()
 }
 func NewWizard(ctx context.Context, s *app.Service, req app.NewRequest, repos []string, base string) error {

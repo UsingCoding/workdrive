@@ -16,6 +16,8 @@ import (
 var ErrCancelled = errors.New("selection canceled")
 
 func run(ctx context.Context, model tea.Model) (tea.Model, error) {
+	restoreColors := configureColors(ctx)
+	defer restoreColors()
 	return tea.NewProgram(model, tea.WithContext(ctx)).Run()
 }
 
@@ -86,10 +88,10 @@ func (p picker) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 }
 func (p picker) View() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n%s\n", p.title, p.input.View())
+	fmt.Fprintf(&b, "%s\n%s\n", accentStyle.Render(p.title), p.input.View())
 	matches := p.matches()
 	if len(matches) == 0 {
-		b.WriteString("No matches\n")
+		b.WriteString(mutedStyle.Render("No matches") + "\n")
 	}
 	limit := p.height - 5
 	if limit < 1 {
@@ -103,13 +105,9 @@ func (p picker) View() string {
 		start = p.cursor - limit + 1
 	}
 	for _, i := range matches[start : start+limit] {
-		marker := "  "
-		if i == matches[p.cursor] {
-			marker = "> "
-		}
-		fmt.Fprintf(&b, "%s%s\n", marker, p.labels[i])
+		b.WriteString(listRow(p.labels[i], i == matches[p.cursor]) + "\n")
 	}
-	b.WriteString("↑/↓ choose  enter select  esc cancel\n")
+	b.WriteString(helpLine("↑/↓ choose · Enter select · Esc cancel"))
 	return b.String()
 }
 func choose(ctx context.Context, p picker) (string, error) {
@@ -186,7 +184,9 @@ func (m confirmation) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	return m, nil
 }
-func (m confirmation) View() string { return m.message + "\nConfirm? [y/N] " }
+func (m confirmation) View() string {
+	return warningStyle.Render(m.message) + "\n" + accentStyle.Render("Confirm? [y/N]") + " "
+}
 func Confirm(ctx context.Context, message string) (bool, error) {
 	result, err := run(ctx, confirmation{message: message})
 	if err != nil {
@@ -204,7 +204,9 @@ func (m notice) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	return m, nil
 }
-func (m notice) View() string { return string(m) + "\nPress any key to close.\n" }
+func (m notice) View() string {
+	return warningStyle.Render(string(m)) + "\n" + mutedStyle.Render("Press any key to close.") + "\n"
+}
 
 func PreviewCleanup(ctx context.Context, plan app.Plan) (bool, error) {
 	if plan.Workspace == nil {

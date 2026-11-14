@@ -40,6 +40,9 @@ func Execute() error {
 func (c *command) root() *cobra.Command {
 	root := &cobra.Command{Use: "workdrive", Short: "Local workspace and Git worktree lifecycle manager", SilenceUsage: true, SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if c.noColor {
+				cmd.SetContext(tui.WithoutColor(cmd.Context()))
+			}
 			cfg, err := config.Load(c.configPath)
 			if err != nil {
 				return err
@@ -58,7 +61,7 @@ func (c *command) root() *cobra.Command {
 			if !tty() {
 				return app.ErrNeedsTTY
 			}
-			return tui.Dashboard(context.Background(), c.service)
+			return tui.Dashboard(cmd.Context(), c.service)
 		},
 	}
 	root.PersistentFlags().StringVar(&c.configPath, "config", "", "configuration TOML path")
@@ -85,14 +88,14 @@ func (c *command) requireTTY() error {
 	}
 	return nil
 }
-func (c *command) selectKey(arg []string) (string, error) {
+func (c *command) selectKey(ctx context.Context, arg []string) (string, error) {
 	if len(arg) > 0 {
 		return arg[0], nil
 	}
 	if err := c.requireTTY(); err != nil {
 		return "", fmt.Errorf("workspace key omitted: %w", err)
 	}
-	return tui.PickWorkspace(context.Background(), c.service)
+	return tui.PickWorkspace(ctx, c.service)
 }
 func (c *command) encode(v any) error { return json.NewEncoder(c.out).Encode(v) }
 func (c *command) showWarnings(w []string) {
@@ -152,7 +155,7 @@ func (c *command) listCommand() *cobra.Command {
 }
 func (c *command) inspectCommand() *cobra.Command {
 	return &cobra.Command{Use: "inspect [key]", Short: "Inspect workspace and actual worktree health", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		key, err := c.selectKey(args)
+		key, err := c.selectKey(cmd.Context(), args)
 		if err != nil {
 			return err
 		}
@@ -177,7 +180,7 @@ func (c *command) inspectCommand() *cobra.Command {
 func (c *command) switchCommand() *cobra.Command {
 	var printPath bool
 	cmd := &cobra.Command{Use: "switch [key]", Short: "Enter a workspace in a new interactive shell", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		key, err := c.selectKey(args)
+		key, err := c.selectKey(cmd.Context(), args)
 		if err != nil {
 			return err
 		}
@@ -211,7 +214,7 @@ func (c *command) switchCommand() *cobra.Command {
 }
 func (c *command) parkCommand() *cobra.Command {
 	return &cobra.Command{Use: "park [key]", Short: "Mark a workspace parked without modifying worktrees", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		key, err := c.selectKey(args)
+		key, err := c.selectKey(cmd.Context(), args)
 		if err != nil {
 			return err
 		}
@@ -250,7 +253,7 @@ func (c *command) choices(ctx context.Context, values []string, profile string) 
 func (c *command) addCommand() *cobra.Command {
 	var repos []string
 	repo := &cobra.Command{Use: "repo [key]", Short: "Add local repository worktrees", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		key, err := c.selectKey(args)
+		key, err := c.selectKey(cmd.Context(), args)
 		if err != nil {
 			return err
 		}
@@ -289,7 +292,7 @@ func (c *command) removeCommand() *cobra.Command {
 		if err := c.requireTTY(); err != nil {
 			return err
 		}
-		key, err := c.selectKey(args)
+		key, err := c.selectKey(cmd.Context(), args)
 		if err != nil {
 			return err
 		}
@@ -325,7 +328,7 @@ func (c *command) cleanupCommand() *cobra.Command {
 		if err := c.requireTTY(); err != nil {
 			return fmt.Errorf("cleanup refuses noninteractive execution: %w", err)
 		}
-		key, err := c.selectKey(args)
+		key, err := c.selectKey(cmd.Context(), args)
 		if err != nil {
 			return err
 		}
@@ -385,7 +388,7 @@ func (c *command) configCommand() *cobra.Command {
 }
 func (c *command) resumeCommand() *cobra.Command {
 	return &cobra.Command{Use: "resume [key]", Short: "Inspect and resume an interrupted operation", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		key, err := c.selectKey(args)
+		key, err := c.selectKey(cmd.Context(), args)
 		if err != nil {
 			return err
 		}

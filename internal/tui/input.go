@@ -22,14 +22,18 @@ func (t input) Value() string      { return string(t.value) }
 func (t *input) Focus() tea.Cmd    { t.focused = true; return nil }
 func (t *input) Blur()             { t.focused = false }
 func (t input) View() string {
-	if len(t.value) == 0 && !t.focused {
-		return t.Prompt + t.Placeholder
-	}
-	value := string(t.value)
+	prompt := mutedStyle.Render(t.Prompt)
 	if t.focused {
-		value = string(t.value[:t.cursor]) + "▏" + string(t.value[t.cursor:])
+		prompt = accentStyle.Render(t.Prompt)
 	}
-	return t.Prompt + value
+	if len(t.value) == 0 && !t.focused {
+		return prompt + mutedStyle.Render(t.Placeholder)
+	}
+	value := textStyle.Render(string(t.value))
+	if t.focused {
+		value = textStyle.Render(string(t.value[:t.cursor])) + accentStyle.Render("▏") + textStyle.Render(string(t.value[t.cursor:]))
+	}
+	return prompt + value
 }
 func (t input) Update(message tea.Msg) (input, tea.Cmd) {
 	key, ok := message.(tea.KeyMsg)
