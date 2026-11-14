@@ -14,7 +14,11 @@ mise run test
 .build/workdrive --help
 ```
 
-`mise run fmt` formats the Go sources. To run the disposable **real Worktrunk** integration test, explicitly opt in with `WORKDRIVE_REAL_WT=1 go test ./internal/drivers/worktrunk`. Tests never use your existing repositories.
+`mise run fmt` formats the Go sources. To run the disposable **real Worktrunk** adapter test, explicitly opt in with `WORKDRIVE_REAL_WT=1 go test ./internal/drivers/worktrunk`. Tests never use your existing repositories.
+
+## Docker CLI end-to-end tests
+
+`mise run test:e2e` runs Go test cases that start disposable Docker containers via testcontainers-go. The single-stage Debian Trixie image uses mise to install the project-pinned Go and Worktrunk v0.81.0; its OS-provided Git is checked at build time to satisfy Worktrunk's Git 2.43.0 minimum. It builds the real Workdrive CLI and includes a Go PTY driver for the interactive wizard and destructive confirmations. Git fixtures, configuration, state, and workspaces are created inside the containers; no host repository is mounted. A running Docker daemon is required. This opt-in suite is separate from `mise run test` and runs in a dedicated Ubuntu CI job; a requested E2E run fails if Docker is unavailable. See [the E2E architecture and scenarios](docs/E2E_TESTS.md).
 
 ## Configuration
 

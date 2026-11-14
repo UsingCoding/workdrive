@@ -1,0 +1,12 @@
+.git
+.build
+.claude
+.github
+docs
+examples
+spec
+README.md
+*.test
+workdrive
+tests/e2e/cli_test.go
+tests/e2e/terminal/main_test.go

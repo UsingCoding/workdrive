@@ -24,6 +24,11 @@ Specification: [`spec/WORKDRIVE_SPEC.md`](../spec/WORKDRIVE_SPEC.md), section 1.
 - `go test -race ./internal/app ./internal/tui` — passed.
 - Gated real Worktrunk test with installed `wt v0.68.0` and disposable repositories — passed; verified invocation-local path override and foreground branch-preserving removal.
 - CLI `--help`, `config validate`, empty `list --json`, non-TTY refusal tests — passed.
+- `mise run test:e2e` — passed with Docker, Worktrunk v0.81.0, and Git satisfying Worktrunk's 2.43.0 minimum.
+
+## Docker CLI end-to-end suite
+
+`mise run test:e2e` builds a single-stage Linux image with the actual CLI, OS-provided Git, and mise-managed Go and Worktrunk, then drives the wizard and confirmations through a real PTY. Passing scenarios cover zero-repo creation/cancellation, real worktree creation/add/remove/cleanup, park/switch, dirty/ignored/unknown-data blockers, registry refresh, and interrupted create/resume. The suite is opt-in locally and is wired to a dedicated Ubuntu CI job.
 
 ## Scope decisions and deviations
 

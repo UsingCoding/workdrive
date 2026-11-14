@@ -7,7 +7,7 @@ run = "go build -o .build/workdrive ./cmd/workdrive"
 
 [tasks.lint]
 description = "Check formatting and run go vet"
-run = "test -z \"$(gofmt -l cmd internal)\" && go vet ./..."
+run = "test -z \"$(gofmt -l cmd internal tests)\" && go vet ./..."
 
 [tasks.test]
 description = "Run the complete automated test suite"
@@ -15,4 +15,8 @@ run = "go test ./..."
 
 [tasks.fmt]
 description = "Format Go source files"
-run = "gofmt -w cmd internal"
+run = "gofmt -w cmd internal tests"
+
+[tasks."test:e2e"]
+description = "Run Docker-backed real-CLI end-to-end tests"
+run = "go test -tags=e2e ./tests/e2e -count=1 -v -timeout=20m"
