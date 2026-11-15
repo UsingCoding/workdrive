@@ -71,14 +71,7 @@ func (s *Service) Find(key string) (*domain.Workspace, error) {
 	if entry == nil {
 		return nil, fmt.Errorf("%w: %s (run refresh to discover manifests)", ErrNotFound, key)
 	}
-	w, err := manifest.Read(entry.Path)
-	if err != nil {
-		return nil, fmt.Errorf("%w: manifest for %s: %v", ErrInterrupted, key, err)
-	}
-	if w.Key != key || w.Path != entry.Path {
-		return nil, fmt.Errorf("%w: registry and manifest disagree for %s", ErrConflict, key)
-	}
-	return w, nil
+	return validateIndexedManifest(entry)
 }
 
 // List rechecks manifests; the SQLite index alone never establishes ownership.
@@ -91,13 +84,9 @@ func (s *Service) List() ([]*domain.Workspace, []string, error) {
 	var warnings []string
 	seen := make(map[string]string)
 	for _, e := range entries {
-		w, err := manifest.Read(e.Path)
+		w, err := validateIndexedManifest(&e)
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("%s: manifest missing or invalid: %v", e.Key, err))
-			continue
-		}
-		if w.Key != e.Key || w.Path != e.Path {
-			warnings = append(warnings, fmt.Sprintf("%s: manifest/index identity conflict", e.Key))
+			warnings = append(warnings, fmt.Sprintf("%s: manifest missing, invalid or conflicting: %v", e.Key, err))
 			continue
 		}
 		seen[e.Key] = e.Path
@@ -168,36 +157,21 @@ func (s *Service) List() ([]*domain.Workspace, []string, error) {
 // that a worktree is still healthy. Inspection performs the actual Git checks.
 func markUnverified(w *domain.Workspace) {
 	w.ActualStatus = domain.HealthUnknown
-	if st, err := os.Lstat(w.Path); err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+	if ordinaryDirectory(w.Path) != nil {
 		w.ActualStatus = domain.HealthMissing
 		return
 	}
 	for i := range w.Resources {
 		r := &w.Resources[i]
 		r.ActualStatus = domain.HealthUnknown
-		if st, err := os.Lstat(r.Path); err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+		if ordinaryDirectory(r.Path) != nil {
 			r.ActualStatus = domain.HealthMissing
 			w.ActualStatus = domain.HealthMissing
 		}
 	}
 }
 
-func (s *Service) roots() []string {
-	var roots []string
-	add := func(root string) {
-		if canonical, err := config.CanonicalPath(root); err == nil {
-			roots = append(roots, canonical)
-		}
-	}
-	add(s.Config.Workspace.Root)
-	for name := range s.Config.Profiles {
-		c, err := s.Config.Effective(name)
-		if err == nil && c.Workspace.Root != "" {
-			add(c.Workspace.Root)
-		}
-	}
-	return roots
-}
+func (s *Service) roots() []string { return s.Config.WorkspaceRoots() }
 
 func (s *Service) Discover(ctx context.Context, profile string) discovery.Result {
 	if profile == "" {
@@ -426,7 +400,7 @@ func (s *Service) Inspect(ctx context.Context, key string) (*domain.Workspace, [
 			warnings = append(warnings, err.Error())
 		}
 	}
-	if st, err := os.Lstat(w.Path); err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+	if ordinaryDirectory(w.Path) != nil {
 		w.ActualStatus = domain.HealthMissing
 		warnings = append(warnings, "workspace directory missing or unsafe")
 		return w, warnings, nil

@@ -3,8 +3,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/exec"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -27,7 +25,6 @@ type prepared struct {
 	err  error
 }
 type operationDone struct{ err error }
-type shellDone struct{ err error }
 type dashboard struct {
 	ctx          context.Context
 	service      *app.Service
@@ -52,6 +49,8 @@ type dashboard struct {
 	busy         bool
 	progress     int
 	cancel       context.CancelFunc
+	preflight    func() error
+	navigation   *app.Navigation
 }
 
 func newDashboard(ctx context.Context, s *app.Service) dashboard {
@@ -177,11 +176,6 @@ func (d dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		d.inspected = nil
 		return d, d.load()
-	case shellDone:
-		if v.err != nil {
-			d.status = v.err.Error()
-		}
-		return d, d.load()
 	case tea.KeyMsg:
 		k := v.String()
 		if d.busy {
@@ -259,6 +253,7 @@ func (d dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d, cmd
 		}
 		if k == "q" || k == "ctrl+c" {
+			d.navigation = nil
 			return d, tea.Quit
 		}
 		if k == "?" {
@@ -345,20 +340,21 @@ func (d dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			d.removeCursor = 0
 			return d, nil
 		case "enter":
-			key := w.Key
-			workspace, warnings, err := d.service.Switch(key)
+			if d.preflight == nil {
+				d.status = "Shell integration required: eval \"$(workdrive config shell init zsh)\" (or init bash)"
+				return d, nil
+			}
+			if err := d.preflight(); err != nil {
+				d.status = err.Error()
+				return d, nil
+			}
+			navigation, err := d.service.Navigate(app.NavigationRequest{Key: w.Key})
 			if err != nil {
 				d.status = err.Error()
 				return d, nil
 			}
-			d.warnings = warnings
-			shell := os.Getenv("SHELL")
-			if shell == "" {
-				shell = "/bin/sh"
-			}
-			command := exec.Command(shell, "-i")
-			command.Dir = workspace.Path
-			return d, tea.ExecProcess(command, func(err error) tea.Msg { return shellDone{err: err} })
+			d.navigation = &navigation
+			return d, tea.Quit
 		}
 	}
 	return d, nil
@@ -450,9 +446,9 @@ func (d dashboard) View() string {
 		fmt.Fprintf(&b, "%s\n", warningStyle.Render("Warning: "+warning))
 	}
 	if d.help {
-		b.WriteString("\n" + helpLine("↑↓/jk select · / search · f filter · d details · n new · a add · p park · x cleanup · z remove repo · Enter switch · r refresh · q quit"))
+		b.WriteString("\n" + helpLine("↑↓/jk select · / search · f filter · d details · n new · a add · p park · x cleanup · z remove repo · Enter switch & exit · r refresh · q quit"))
 	}
-	b.WriteString("\n" + helpLine("n new · Enter switch · d detail · a add · p park · x cleanup · z remove · r refresh · / search · f filter · ? help · q quit"))
+	b.WriteString("\n" + helpLine("n new · Enter switch & exit · d detail · a add · p park · x cleanup · z remove · r refresh · / search · f filter · ? help · q quit"))
 	return b.String()
 }
 func (d dashboard) count(state string) int {
@@ -464,7 +460,12 @@ func (d dashboard) count(state string) int {
 	}
 	return n
 }
-func Dashboard(ctx context.Context, s *app.Service) error {
-	_, err := run(ctx, newDashboard(ctx, s))
-	return err
+func Dashboard(ctx context.Context, s *app.Service, preflight func() error) (*app.Navigation, error) {
+	d := newDashboard(ctx, s)
+	d.preflight = preflight
+	m, err := run(ctx, d)
+	if err != nil {
+		return nil, err
+	}
+	return m.(dashboard).navigation, nil
 }

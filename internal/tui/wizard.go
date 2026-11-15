@@ -11,13 +11,22 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/usingcoding/workdrive/internal/app"
 	"github.com/usingcoding/workdrive/internal/discovery"
+	"github.com/usingcoding/workdrive/internal/domain"
 )
 
 type discovered struct {
 	result discovery.Result
 	err    error
 }
-type applied struct{ err error }
+type applied struct {
+	workspace *domain.Workspace
+	err       error
+}
+
+type WizardResult struct {
+	Workspace *domain.Workspace
+	Navigate  bool
+}
 type planned struct {
 	plan app.Plan
 	err  error
@@ -29,33 +38,37 @@ func nextProgress() tea.Cmd {
 }
 
 type wizard struct {
-	ctx            context.Context
-	cancel         context.CancelFunc
-	service        *app.Service
-	addKey         string
-	request        app.NewRequest
-	initialChoices []app.RepositoryChoice
-	prefill        []string
-	defaultBase    string
-	step           int // 0 identity, 1 repositories, 2 worktrees, 3 review, 4 applying, 5 result
-	draft          *wizardDraft
-	form           *huh.Form
-	identity       []*huh.Input
-	destination    *huh.Input
-	defaults       worktreeDefaults
-	repositories   []discovery.Repository
-	selected       map[string]app.RepositoryChoice
-	existing       map[string]bool
-	order          []string
-	editIndex      int
-	plan           app.Plan
-	loading        bool
-	warnings       []string
-	status         string
-	progress       int
-	err            error
-	done           bool
-	width, height  int
+	ctx             context.Context
+	cancel          context.CancelFunc
+	service         *app.Service
+	addKey          string
+	request         app.NewRequest
+	initialChoices  []app.RepositoryChoice
+	prefill         []string
+	defaultBase     string
+	step            int // 0 identity, 1 repositories, 2 worktrees, 3 review, 4 applying, 5 result
+	draft           *wizardDraft
+	form            *huh.Form
+	identity        []*huh.Input
+	destination     *huh.Input
+	defaults        worktreeDefaults
+	repositories    []discovery.Repository
+	selected        map[string]app.RepositoryChoice
+	existing        map[string]bool
+	order           []string
+	editIndex       int
+	plan            app.Plan
+	loading         bool
+	warnings        []string
+	status          string
+	progress        int
+	err             error
+	done            bool
+	workspace       *domain.Workspace
+	cancelRequested bool
+	switchAfter     bool
+	navigate        bool
+	width, height   int
 }
 
 func newWizard(ctx context.Context, s *app.Service, req app.NewRequest, prefill []string, base, addKey string) wizard {
@@ -286,6 +299,7 @@ func (w wizard) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return w, nil
 	case applied:
 		w.step = 5
+		w.workspace = msg.workspace
 		w.err = msg.err
 		if msg.err != nil {
 			w.status = msg.err.Error()
@@ -297,6 +311,7 @@ func (w wizard) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		k := msg.String()
 		if w.step == 4 {
 			if k == "esc" || k == "ctrl+c" {
+				w.cancelRequested = true
 				if w.cancel != nil {
 					w.cancel()
 					w.status = "Cancel requested; waiting for the current operation to finish safely"
@@ -305,11 +320,13 @@ func (w wizard) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return w, nil
 		}
 		if k == "ctrl+c" || k == "esc" {
+			w.cancelRequested = true
 			w.done = true
 			return w, tea.Quit
 		}
 		if w.step == 5 {
 			if k == "enter" || k == "q" {
+				w.navigate = k == "enter" && w.switchAfter && !w.cancelRequested && w.err == nil && w.workspace != nil
 				w.done = true
 				return w, tea.Quit
 			}
@@ -356,11 +373,11 @@ func (w wizard) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return w, tea.Batch(nextProgress(), func() tea.Msg {
 					defer cancel()
 					if plan.Kind == "add" {
-						_, err := w.service.Add(ctx, plan)
-						return applied{err: err}
+						workspace, err := w.service.Add(ctx, plan)
+						return applied{workspace: workspace, err: err}
 					}
-					_, err := w.service.Create(ctx, plan)
-					return applied{err: err}
+					workspace, err := w.service.Create(ctx, plan)
+					return applied{workspace: workspace, err: err}
 				})
 			}
 			if k == "b" {
@@ -460,7 +477,11 @@ func (w wizard) View() string {
 	case 4:
 		fmt.Fprintf(&b, "%s\n%s\n", accentStyle.Render(fmt.Sprintf("Applying changes in the background %s", strings.Repeat(".", 1+w.progress%3))), mutedStyle.Render("Esc requests cancellation; wait for the operation journal to settle."))
 	case 5:
-		b.WriteString(helpLine("Enter to close."))
+		if w.switchAfter && w.err == nil && w.workspace != nil && !w.cancelRequested {
+			b.WriteString(helpLine("Enter switch to workspace · q/Esc close without switching"))
+		} else {
+			b.WriteString(helpLine("Enter to close."))
+		}
 	}
 	if w.status != "" {
 		style := accentStyle
@@ -478,12 +499,15 @@ func (w wizard) View() string {
 	b.WriteString(helpLine("Ctrl+B back · Esc cancel"))
 	return b.String()
 }
-func NewWizard(ctx context.Context, s *app.Service, req app.NewRequest, repos []string, base string) error {
-	m, err := run(ctx, newWizard(ctx, s, req, repos, base, ""))
+func NewWizard(ctx context.Context, s *app.Service, req app.NewRequest, repos []string, base string, switchAfter bool) (WizardResult, error) {
+	w := newWizard(ctx, s, req, repos, base, "")
+	w.switchAfter = switchAfter
+	m, err := run(ctx, w)
 	if err != nil {
-		return err
+		return WizardResult{}, err
 	}
-	return m.(wizard).err
+	result := m.(wizard)
+	return WizardResult{Workspace: result.workspace, Navigate: result.navigate}, result.err
 }
 func AddRepos(ctx context.Context, s *app.Service, key string) error {
 	m, err := run(ctx, newWizard(ctx, s, app.NewRequest{}, nil, "", key))

@@ -5,11 +5,13 @@ package discovery
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/usingcoding/workdrive/internal/config"
 )
@@ -30,6 +32,7 @@ type Warning struct {
 type Result struct {
 	Repositories []Repository `json:"repositories"`
 	Warnings     []Warning    `json:"warnings"`
+	Incomplete   bool         `json:"-"` // Hint budget/deadline reached; names may be ambiguous.
 }
 
 // Scan scans at most MaxDepth directory levels beneath each source and
@@ -37,7 +40,47 @@ type Result struct {
 // unreadable directory or invalid .git entry emits a warning without hiding
 // repositories found elsewhere. No symlinked directory is descended into.
 func Scan(ctx context.Context, repositories config.RepositoryConfig, workspaceRoots ...string) Result {
+	return scan(ctx, repositories, HintLimits{}, workspaceRoots...)
+}
+
+// HintLimits bounds metadata-only discovery. Zero/oversized fields use the
+// hard ceilings, so callers cannot accidentally turn completion into a full scan.
+type HintLimits struct {
+	Deadline time.Duration
+	Entries  int
+	Results  int
+}
+
+const (
+	MaxHintDuration = 150 * time.Millisecond
+	MaxHintEntries  = 4096
+	MaxHintResults  = 100
+)
+
+// Hints shares Scan's traversal and exclusions, but .git presence is only a
+// hint. It never executes Git, persists a cache, or follows directory symlinks.
+func Hints(ctx context.Context, repositories config.RepositoryConfig, limits HintLimits, workspaceRoots ...string) Result {
+	if limits.Deadline <= 0 || limits.Deadline > MaxHintDuration {
+		limits.Deadline = MaxHintDuration
+	}
+	if limits.Entries <= 0 || limits.Entries > MaxHintEntries {
+		limits.Entries = MaxHintEntries
+	}
+	if limits.Results <= 0 || limits.Results > MaxHintResults {
+		limits.Results = MaxHintResults
+	}
+	ctx, cancel := context.WithTimeout(ctx, limits.Deadline)
+	defer cancel()
+	return scan(ctx, repositories, limits, workspaceRoots...)
+}
+
+func scan(ctx context.Context, repositories config.RepositoryConfig, limits HintLimits, workspaceRoots ...string) Result {
+	hints := limits.Entries > 0
+	visited := 0
 	result := Result{Repositories: []Repository{}, Warnings: []Warning{}}
+	stopped := func() bool {
+		return ctx.Err() != nil || (hints && (visited >= limits.Entries || len(result.Repositories) >= limits.Results))
+	}
 	seen := make(map[string]bool)
 	var excludedRoots []string
 	for _, root := range workspaceRoots {
@@ -49,6 +92,9 @@ func Scan(ctx context.Context, repositories config.RepositoryConfig, workspaceRo
 		excludedRoots = append(excludedRoots, resolved)
 	}
 	for _, source := range repositories.Sources {
+		if stopped() {
+			break
+		}
 		root, err := config.CanonicalPath(source.Path)
 		if err != nil {
 			result.Warnings = append(result.Warnings, Warning{Root: source.Name, Path: source.Path, Message: err.Error()})
@@ -65,24 +111,18 @@ func Scan(ctx context.Context, repositories config.RepositoryConfig, workspaceRo
 		}
 		var visit func(path string, depth int)
 		visit = func(path string, depth int) {
-			if ctx.Err() != nil {
+			if stopped() {
 				return
 			}
-			for _, excluded := range excludedRoots {
-				if within(excluded, path) {
-					return
-				}
-			}
-			if depth > 0 {
-				rel, _ := filepath.Rel(root, path)
-				for _, pattern := range source.Exclude {
-					if match(pattern, filepath.ToSlash(rel)) {
-						return
-					}
-				}
+			if !allowedPath(source, root, path, excludedRoots) {
+				return
 			}
 			if _, err := os.Lstat(filepath.Join(path, ".git")); err == nil {
-				actual, err := gitTopLevel(ctx, path)
+				actual := path
+				var err error
+				if !hints {
+					actual, err = gitTopLevel(ctx, path)
+				}
 				if err != nil {
 					result.Warnings = append(result.Warnings, Warning{Root: source.Name, Path: path, Message: err.Error()})
 				} else if actual == path && !seen[actual] {
@@ -92,15 +132,36 @@ func Scan(ctx context.Context, repositories config.RepositoryConfig, workspaceRo
 			} else if !os.IsNotExist(err) {
 				result.Warnings = append(result.Warnings, Warning{Root: source.Name, Path: path, Message: fmt.Sprintf("inspect .git: %v", err)})
 			}
-			if depth >= source.MaxDepth {
+			if depth >= source.MaxDepth || stopped() {
 				return
 			}
-			entries, err := os.ReadDir(path)
+			var entries []os.DirEntry
+			var err error
+			if hints {
+				// Unlike os.ReadDir, this never allocates an unbounded directory
+				// listing before applying the completion budget.
+				var dir *os.File
+				dir, err = os.Open(path)
+				if err == nil {
+					entries, err = dir.ReadDir(limits.Entries - visited)
+					dir.Close()
+					if err == io.EOF {
+						err = nil
+					}
+					sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+				}
+			} else {
+				entries, err = os.ReadDir(path)
+			}
 			if err != nil {
 				result.Warnings = append(result.Warnings, Warning{Root: source.Name, Path: path, Message: fmt.Sprintf("read directory: %v", err)})
 				return
 			}
 			for _, entry := range entries {
+				if stopped() {
+					break
+				}
+				visited++
 				if entry.Name() == ".git" || !entry.IsDir() {
 					continue
 				}
@@ -126,10 +187,59 @@ func Scan(ctx context.Context, repositories config.RepositoryConfig, workspaceRo
 			repo.DisplayName = fmt.Sprintf("%s [%s: %s]", repo.Name, repo.Source, repo.Path)
 		}
 	}
+	result.Incomplete = hints && (stopped() || len(result.Warnings) > 0)
 	if err := ctx.Err(); err != nil {
 		result.Warnings = append(result.Warnings, Warning{Message: err.Error()})
 	}
 	return result
+}
+
+// AllowsHint checks only configured bounds and exclusions, allowing recorded
+// source paths to be merged with fresh hints without bypassing discovery scope.
+func AllowsHint(repositories config.RepositoryConfig, path string, workspaceRoots ...string) bool {
+	var excluded []string
+	for _, root := range workspaceRoots {
+		if canonical, err := config.CanonicalPath(root); err == nil {
+			excluded = append(excluded, canonical)
+		}
+	}
+	for _, source := range repositories.Sources {
+		root, err := config.CanonicalPath(source.Path)
+		if err == nil && allowedPath(source, root, path, excluded) {
+			return true
+		}
+	}
+	return false
+}
+
+func allowedPath(source config.Source, root, path string, excluded []string) bool {
+	if !within(root, path) {
+		return false
+	}
+	for _, workspace := range excluded {
+		if within(workspace, path) {
+			return false
+		}
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if len(parts) > source.MaxDepth {
+		return false
+	}
+	for i := 1; i <= len(parts); i++ {
+		for _, pattern := range source.Exclude {
+			if match(pattern, strings.Join(parts[:i], "/")) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func within(parent, path string) bool {

@@ -154,16 +154,12 @@ func (s *Service) PlanRemove(ctx context.Context, key, selector string) (Plan, e
 	if w.State != domain.StateActive && w.State != domain.StateParked {
 		plan.Blockers = append(plan.Blockers, "workspace needs recovery before removing a repository")
 	}
-	for _, r := range w.Resources {
-		if selector == r.ID || selector == r.Source || selector == r.Path || selector == filepath.Base(r.Source) {
-			plan.Remove = append(plan.Remove, r)
-		}
-	}
-	if len(plan.Remove) != 1 {
-		plan.Blockers = append(plan.Blockers, fmt.Sprintf("repository selector %q matches %d worktrees; use its absolute source path or ID", selector, len(plan.Remove)))
+	r, err := ResolveResource(w, selector)
+	if err != nil {
+		plan.Blockers = append(plan.Blockers, err.Error())
 		return plan, nil
 	}
-	r := plan.Remove[0]
+	plan.Remove = []domain.Resource{r}
 	if r.Ownership != domain.OwnershipOwned || r.Type != "worktree" {
 		plan.Blockers = append(plan.Blockers, "resource is not an owned worktree")
 	}

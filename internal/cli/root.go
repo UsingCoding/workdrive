@@ -16,6 +16,7 @@ import (
 	"github.com/usingcoding/workdrive/internal/config"
 	"github.com/usingcoding/workdrive/internal/discovery"
 	"github.com/usingcoding/workdrive/internal/domain"
+	"github.com/usingcoding/workdrive/internal/shellintegration"
 	"github.com/usingcoding/workdrive/internal/tui"
 )
 
@@ -24,10 +25,17 @@ type command struct {
 	jsonOutput, noColor, verbose bool
 	service                      *app.Service
 	out, errOut                  io.Writer
+	integration                  *shellintegration.Invocation
+	origin                       *domain.Workspace
 }
 
 func Execute() error {
-	c := &command{out: os.Stdout, errOut: os.Stderr}
+	integration, err := shellintegration.Capture()
+	if err != nil {
+		return err
+	}
+	defer integration.Close()
+	c := &command{out: os.Stdout, errOut: os.Stderr, integration: integration}
 	root := c.root()
 	defer func() {
 		if c.service != nil {
@@ -42,6 +50,9 @@ func (c *command) root() *cobra.Command {
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if c.noColor {
 				cmd.SetContext(tui.WithoutColor(cmd.Context()))
+			}
+			if shellUtility(cmd) {
+				return nil
 			}
 			cfg, err := config.Load(c.configPath)
 			if err != nil {
@@ -61,7 +72,11 @@ func (c *command) root() *cobra.Command {
 			if !tty() {
 				return app.ErrNeedsTTY
 			}
-			return tui.Dashboard(cmd.Context(), c.service)
+			navigation, err := tui.Dashboard(cmd.Context(), c.service, c.prepareNavigation)
+			if err != nil || navigation == nil {
+				return err
+			}
+			return c.publishNavigation(*navigation)
 		},
 	}
 	root.PersistentFlags().StringVar(&c.configPath, "config", "", "configuration TOML path")
@@ -70,6 +85,7 @@ func (c *command) root() *cobra.Command {
 	root.PersistentFlags().BoolVar(&c.noColor, "no-color", false, "disable terminal colors")
 	root.PersistentFlags().BoolVarP(&c.verbose, "verbose", "v", false, "verbose diagnostics")
 	root.AddCommand(c.newCommand(), c.listCommand(), c.inspectCommand(), c.switchCommand(), c.parkCommand(), c.addCommand(), c.removeCommand(), c.cleanupCommand(), c.refreshCommand(), c.configCommand(), c.resumeCommand())
+	c.configureCompletions(root)
 	return root
 }
 
@@ -107,7 +123,13 @@ func (c *command) showWarnings(w []string) {
 func (c *command) newCommand() *cobra.Command {
 	var name, base string
 	var repos []string
+	var switchAfter bool
 	cmd := &cobra.Command{Use: "new [key]", Short: "Open the editable workspace creation wizard", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if switchAfter {
+			if err := c.prepareNavigation(); err != nil {
+				return err
+			}
+		}
 		if err := c.requireTTY(); err != nil {
 			return fmt.Errorf("new always opens a wizard: %w", err)
 		}
@@ -115,8 +137,17 @@ func (c *command) newCommand() *cobra.Command {
 		if len(args) > 0 {
 			key = args[0]
 		}
-		return tui.NewWizard(cmd.Context(), c.service, app.NewRequest{Key: key, Name: name, Profile: c.profile}, repos, base)
+		result, err := tui.NewWizard(cmd.Context(), c.service, app.NewRequest{Key: key, Name: name, Profile: c.profile}, repos, base, switchAfter)
+		if err != nil || !result.Navigate {
+			return err
+		}
+		navigation, err := c.service.Navigate(app.NavigationRequest{Key: result.Workspace.Key, ExpectedID: result.Workspace.ID, ExpectedPath: result.Workspace.Path})
+		if err != nil {
+			return err
+		}
+		return c.publishNavigation(navigation)
 	}}
+	cmd.Flags().BoolVar(&switchAfter, "switch", false, "offer current-shell navigation after successful creation")
 	cmd.Flags().StringVar(&name, "name", "", "workspace display title")
 	cmd.Flags().StringArrayVar(&repos, "repo", nil, "source repository name or absolute path (repeatable)")
 	cmd.Flags().StringVar(&base, "base", "", "Git base ref for new branches")
@@ -178,38 +209,58 @@ func (c *command) inspectCommand() *cobra.Command {
 	}}
 }
 func (c *command) switchCommand() *cobra.Command {
-	var printPath bool
-	cmd := &cobra.Command{Use: "switch [key]", Short: "Enter a workspace in a new interactive shell", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		key, err := c.selectKey(cmd.Context(), args)
-		if err != nil {
-			return err
-		}
-		if !printPath {
+	var printPath, nested bool
+	var repository string
+	cmd := &cobra.Command{Use: "switch [key|-]", Short: "Switch the current shell to a workspace", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if !printPath && !nested {
+			if err := c.prepareNavigation(); err != nil {
+				return err
+			}
+		} else if nested {
 			if err := c.requireTTY(); err != nil {
 				return err
 			}
 		}
-		w, warnings, err := c.service.Switch(key)
+		key, err := c.selectKey(cmd.Context(), args)
 		if err != nil {
 			return err
 		}
-		c.showWarnings(warnings)
-		if printPath {
-			_, err = fmt.Fprintln(c.out, w.Path)
+		req := app.NavigationRequest{Key: key, Repository: repository}
+		// Only a typed `-` before any `--` means history; a picker selection or
+		// `switch -- -` is the literal workspace key.
+		if len(args) == 1 && args[0] == "-" && cmd.ArgsLenAtDash() != 0 {
+			identity, err := c.previousWorkspace()
+			if err != nil {
+				return err
+			}
+			req.Key, req.ExpectedID, req.ExpectedPath = identity.Key, identity.ID, identity.Path
+		}
+		navigation, err := c.service.Navigate(req)
+		if err != nil {
 			return err
 		}
+		if printPath {
+			c.showWarnings(navigation.Warnings)
+			_, err = fmt.Fprintln(c.out, navigation.Path)
+			return err
+		}
+		if !nested {
+			return c.publishNavigation(navigation)
+		}
+		c.showWarnings(navigation.Warnings)
 		shell := os.Getenv("SHELL")
 		if shell == "" {
 			shell = "/bin/sh"
 		}
 		child := exec.CommandContext(cmd.Context(), shell, "-i")
-		child.Dir = w.Path
-		child.Stdin = os.Stdin
-		child.Stdout = os.Stdout
-		child.Stderr = os.Stderr
+		child.Dir = navigation.Path
+		child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
 		return child.Run()
 	}}
-	cmd.Flags().BoolVar(&printPath, "print-path", false, "print absolute workspace path only")
+	cmd.Flags().BoolVar(&printPath, "print-path", false, "print the absolute destination path only")
+	cmd.Flags().BoolVar(&nested, "shell", false, "start a nested interactive shell instead of navigating")
+	cmd.Flags().StringVar(&repository, "repo", "", "recorded worktree ID, source/destination path or unique source basename")
+	cmd.MarkFlagsMutuallyExclusive("shell", "print-path")
 	return cmd
 }
 func (c *command) parkCommand() *cobra.Command {
@@ -263,7 +314,11 @@ func (c *command) addCommand() *cobra.Command {
 			}
 			return tui.AddRepos(cmd.Context(), c.service, key)
 		}
-		choices, err := c.choices(cmd.Context(), repos, "")
+		workspace, err := c.service.Find(key)
+		if err != nil {
+			return err
+		}
+		choices, err := c.choices(cmd.Context(), repos, workspace.Profile)
 		if err != nil {
 			return err
 		}
@@ -371,6 +426,7 @@ func (c *command) refreshCommand() *cobra.Command {
 }
 func (c *command) configCommand() *cobra.Command {
 	root := &cobra.Command{Use: "config", Short: "Configuration commands"}
+	root.AddCommand(c.shellCommand())
 	root.AddCommand(&cobra.Command{Use: "validate", Short: "Validate configuration and profiles", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := config.Load(c.configPath)
 		if err != nil {

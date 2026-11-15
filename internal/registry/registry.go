@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -59,6 +60,37 @@ func Open(path string) (*Registry, error) {
 		);`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("initialize registry: %w", err)
+	}
+	return &Registry{db: db}, nil
+}
+
+// OpenReadOnly opens only an existing ordinary database, without creating
+// directories or schema. A missing database returns (nil, nil). The registry
+// uses SQLite's rollback journal; read-only mode retains normal locking against
+// concurrent writers without creating a journal of its own.
+func OpenReadOnly(path string) (*Registry, error) {
+	if !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("registry path must be absolute: %q", path)
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("registry is not an ordinary file: %q", path)
+	}
+	u := url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(50)"}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
 	}
 	return &Registry{db: db}, nil
 }

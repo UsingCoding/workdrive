@@ -362,3 +362,30 @@ func hasDotDot(path string) bool {
 	}
 	return false
 }
+
+// WorkspaceRoots lists the canonical base root plus each profile's effective
+// root, in profile-name order. Discovery excludes them and the registry
+// rebuilds from them, so both must see the same list.
+func (c *Config) WorkspaceRoots() []string {
+	var roots []string
+	add := func(root string) {
+		if root == "" {
+			return
+		}
+		if canonical, err := CanonicalPath(root); err == nil {
+			roots = append(roots, canonical)
+		}
+	}
+	add(c.Workspace.Root)
+	names := make([]string, 0, len(c.Profiles))
+	for name := range c.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if effective, err := c.Effective(name); err == nil {
+			add(effective.Workspace.Root)
+		}
+	}
+	return roots
+}

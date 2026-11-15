@@ -1,6 +1,6 @@
 FROM debian:trixie-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git xz-utils \
+RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates curl git xz-utils zsh \
     && dpkg --compare-versions "$(git version | cut -d' ' -f3)" ge 2.43.0 \
     && rm -rf /var/lib/apt/lists/*
 RUN set -eu; \

@@ -136,57 +136,71 @@ func (s *Service) Park(key string) (*domain.Workspace, error) {
 }
 
 func (s *Service) Switch(key string) (*domain.Workspace, []string, error) {
-	lock, err := s.lock(key)
+	n, err := s.Navigate(NavigationRequest{Key: key})
+	return n.Workspace, n.Warnings, err
+}
+
+func (s *Service) Navigate(req NavigationRequest) (Navigation, error) {
+	lock, err := s.lock(req.Key)
 	if err != nil {
-		return nil, nil, err
+		return Navigation{}, err
 	}
 	defer lock.Unlock()
-	w, err := s.Find(key)
+	w, err := s.Find(req.Key)
 	if err != nil {
-		return nil, nil, err
+		return Navigation{}, err
 	}
-	cfg, err := s.profileFor(w)
-	if err != nil {
-		return nil, nil, err
+	if (req.ExpectedID != "" && req.ExpectedID != w.ID) || (req.ExpectedPath != "" && req.ExpectedPath != w.Path) {
+		return Navigation{}, fmt.Errorf("%w: workspace identity changed; select it explicitly", ErrConflict)
 	}
-	if !sameRoot(w.Path, cfg.Workspace.Root) {
-		return nil, nil, fmt.Errorf("%w: workspace outside configured root", ErrConflict)
+	if err := s.validateNavigationRoot(w); err != nil {
+		return Navigation{}, err
 	}
-	st, err := os.Lstat(w.Path)
-	if err != nil {
-		return nil, nil, err
-	}
-	if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
-		return nil, nil, fmt.Errorf("%w: workspace path is not an ordinary directory", ErrConflict)
+	destination := w.Path
+	if req.Repository != "" {
+		r, err := ResolveResource(w, req.Repository)
+		if err != nil {
+			return Navigation{}, err
+		}
+		if r.Type != "worktree" {
+			return Navigation{}, fmt.Errorf("resource %s is not a worktree", r.ID)
+		}
+		destination, err = config.ValidateDestination(w.Path, r.Path)
+		if err != nil {
+			return Navigation{}, err
+		}
+		if err := ordinaryDirectory(destination); err != nil {
+			return Navigation{}, fmt.Errorf("repository destination: %w", err)
+		}
 	}
 	if w.State == domain.StateParked {
 		op, err := s.Journal.Plan(w.ID, "switch", []lifecycle.Step{{ID: "state", Description: "Mark workspace active"}})
 		if err != nil {
-			return nil, nil, err
+			return Navigation{}, err
 		}
 		if err := w.Transition(domain.StateActive, time.Now().UTC()); err != nil {
-			return nil, nil, err
+			return Navigation{}, err
 		}
 		if err := manifest.Write(w); err != nil {
 			s.Journal.RecordError(op.ID, err)
-			return nil, nil, err
+			return Navigation{}, err
 		}
 		if err := s.Registry.Upsert(w); err != nil {
-			return nil, nil, s.fail(w, op.ID, err)
+			return Navigation{}, s.fail(w, op.ID, err)
 		}
 		if _, err := s.Journal.Complete(op.ID, "state"); err != nil {
-			return nil, nil, s.fail(w, op.ID, err)
+			return Navigation{}, s.fail(w, op.ID, err)
 		}
 	} else if w.State != domain.StateActive {
-		return nil, nil, fmt.Errorf("%w: workspace state %s needs recovery", ErrInterrupted, w.State)
+		return Navigation{}, fmt.Errorf("%w: workspace state %s needs recovery", ErrInterrupted, w.State)
 	}
-	var warnings []string
+	n := Navigation{Workspace: w, Path: destination}
 	for _, r := range w.Resources {
 		if _, err := os.Lstat(r.Path); err != nil {
-			warnings = append(warnings, "missing worktree: "+r.Path)
+			n.Warnings = append(n.Warnings, "missing worktree: "+r.Path)
 		}
 	}
-	return w, warnings, nil
+	return n, nil
 }
 
 func (s *Service) PlanAdd(ctx context.Context, key string, choices []RepositoryChoice) (Plan, error) {

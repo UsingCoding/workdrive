@@ -120,21 +120,59 @@ A usable offline CLI/TUI capable of creating, finding, inspecting, entering, par
 ```text
 workdrive                                  # dashboard
 workdrive new [key] [--name <title>] [--repo <name-or-path> ...]
-              [--profile <name>] [--base <ref>]
+              [--profile <name>] [--base <ref>] [--switch]
 workdrive list [--json] [--state active|parked|all]
 workdrive inspect [key] [--json]           # key omitted => picker
-workdrive switch [key] [--print-path]      # key omitted => picker
+workdrive switch [key|-] [--repo <recorded-selector>] [--shell | --print-path]
+                                          # key omitted => picker
+workdrive switch -- -                     # literal '-' key, not previous history
 workdrive park [key]                       # key omitted => picker
 workdrive add repo [key] [--repo <name-or-path> ...]
 workdrive remove repo [key] [--repo <name-or-path>]
 workdrive cleanup [key]                    # preflight, preview, approval
 workdrive refresh [key]                    # scan and verify local state
 workdrive config validate
+workdrive config shell init <zsh|bash>      # initialization + completion code only
+workdrive completion <zsh|bash>             # standalone Cobra completion script
 ```
 
 Shared flags: `--config PATH`, `--profile NAME` where meaningful, `--json` for machine-readable read-only results, `--no-color`, `--verbose`. Noninteractive commands requiring a selection must fail clearly when no TTY is available. MVP 1 does not require headless workspace creation. `cleanup` without a TTY must refuse unless a future explicit and safe approval mechanism is implemented.
 
-**Shell caveat:** A subprocess cannot change its parent shell's current directory. In MVP 1, `switch` should launch an interactive shell with cwd set to the workspace (without changing the caller's shell), or `--print-path` can print an absolute path for shell integration. Document both behaviors; don't claim it can `cd` the parent shell. In MVP 2, a configured `open` resource (TUIOS) can become the preferred switch destination.
+### Current-shell switching
+
+A subprocess cannot change its parent shell's cwd. MVP 1 provides opt-in bash/zsh integration: `eval "$(workdrive config shell init zsh)"` in `.zshrc` **after compinit**, or `init bash` in `.bashrc`. Initialization emits the wrapper and registers Cobra completion, is repeatable, never edits rc files, and works despite malformed workspace configuration. Static completion script generation also bypasses configuration/service startup. Unsupported shells fail clearly.
+
+- Ordinary `switch KEY` and the no-key picker navigate the invoking shell through this wrapper; there is **no implicit nested-shell fallback**. Without integration, fail with setup instructions before activation. Dashboard browsing remains available, but Enter requires integration.
+- Dashboard Enter validates the target, quits Bubble Tea, restores the terminal, then requests navigation. Quit/cancel/error never navigates. Dashboard `n` creation returns to browsing.
+- Explicit `--shell` launches an interactive nested `$SHELL` at the selected destination; exiting leaves the parent cwd unchanged. `--print-path` retains activation and exact path-only stdout, with warnings on stderr. These modes are mutually exclusive and never update parent-shell history. Both accept `--repo`.
+- Explicit-key integrated navigation does not require a TTY. Pickers, dashboard, wizard and nested interactive shells do. Direct executable invocation bypasses integration; a pipeline/subshell cannot navigate its enclosing shell. Document `cd -- "$(workdrive switch KEY --print-path)"` as the scripting alternative.
+- `switch -` means the previous **workspace**, not the previous repository directory, `OLDPWD`, or globally active workspace. Store a non-exported per-shell opaque ID/key/root token only after successful `cd` between different workspaces. Same-workspace repository moves do not rotate it; an outside-workspace origin retains it. Resolve actual cwd through a valid registered manifest ancestor so manual `cd` is honored. Invalid/deleted/replaced identities fail without discarding history. The key `-` remains legal everywhere: `switch -- -` selects that literal key.
+- `--repo` selects an existing recorded worktree by stable resource ID, source path, destination path or unique source basename. Share the pure selector with removal and completion, retaining ambiguity errors. Under the workspace lock, validate manifest/root, containment and absence of symlink traversal, and require an ordinary existing target directory **before activation**. Invalid selections fail without root fallback. Dirty worktrees remain navigable; missing unselected worktrees are warnings. No provisioning, repair or removal planning occurs.
+- `new --switch` preflights integration before the editable wizard. Retain the actual `Service.Create` result (not the reviewed plan), including final edited key/profile and generated identity. Only confirmed **Enter on full success**, followed by clean TUI shutdown and shared navigation validation, authorizes handoff. Result `q`/`Esc`/`Ctrl+C`, partial failures, and cancellation before/during apply never navigate; cancellation suppresses navigation even if a late apply succeeds. Ordinary `new` and embedded dashboard/add flows retain their existing behavior.
+
+The wrapper preserves terminal stdin/stdout/stderr and uses a private per-invocation ordinary file with a versioned NUL-delimited literal record (destination, history action and opaque token). Validate the complete record; never evaluate/source runtime handoff data. Preserve literal path characters, including spaces and newlines. Capture/remove integration environment values before application initialization so adapters, hooks and nested shells cannot inherit the capability. Preflight the writable file without following symlinks before mutation; publish only on successful navigation and successful terminal restoration. The wrapper performs `builtin cd -- "$target"` only after binary success, commits history only after successful `cd`, and cleans up without masking primary failure status. Ctrl-C cleanup restores existing traps for subsequent signals and leaves prompt hooks intact; the wrapper owns cancellation and does not replay a prior INT handler for the intercepted event. SIGKILL cleanup is not guaranteed. Completion receives history but no handoff capability.
+
+Activation and parent-shell `cd` are not atomic. Late publication or `cd` failure reports an error without rolling lifecycle state back; active state is not a shell-presence tracker. MVP 2 may prefer a configured `open` resource such as TUIOS while retaining this fallback contract.
+
+### Context-aware completion
+
+Use Cobra's generated scripts, positional callbacks and flag callbacks, respecting parsed flags on either side of positionals, `--repo=value`, repeated flags and effective profiles. Sort deterministically, sanitize descriptions, omit protocol-delimiter values, disable filename fallback for semantic values, and keep stdout exclusively Cobra's completion protocol.
+
+| Context | Candidates |
+| --- | --- |
+| Existing workspace arguments | Indexed, manifest-validated keys with title/state; `switch` only active/parked, plus history `-` only if valid. |
+| `switch KEY --repo`, `switch - --repo` | That workspace's supported recorded worktrees, never sources; unknown workspace yields none. |
+| `remove repo KEY --repo` | Recorded selectors that uniquely round-trip through the shared matching helper. |
+| `new --repo` | Bounded source-repository hints excluding supplied sources. |
+| `add repo KEY --repo` | Hints for the target workspace's effective profile, excluding attached/supplied sources. |
+| `--profile` | Sorted profiles from merged TOML and named overlays. |
+| `list --state` | `active`, `parked`, `all`. |
+| `config shell init` | `bash`, `zsh`. |
+| `--config` | TOML filename filtering, without loading the candidate. |
+| `new --base` | `default`, plus the intersection of common local refs from explicitly selected/unambiguously resolved sources. |
+| `new [key]`, `--name` | Free text; no unrelated workspace/file suggestions. |
+
+Completion is a **read-only query boundary**, not ordinary service startup: open only an existing index read-only, validate indexed manifests without scanning all workspace roots, and create no registry/schema/directories/journals/cache files when state is absent. Do not activate, repair, refresh, update history or perform remote operations. Source suggestions merge recorded paths with deadline/entry/result-bounded metadata-only discovery respecting configured depth/exclusions and every workspace root; `.git` is only a hint, not Git validation on every Tab. Offer short source names only when complete, warning-free metadata traversal and the shared resolver prove a unique round trip; otherwise use absolute paths, also honoring an explicit absolute-path prefix. Use accepted full paths/IDs when recorded resource short names cannot round-trip. Local-ref queries are injectable, read-only and limited to explicitly resolved sources; no fetch, hooks or all-repository scan. Ambiguity/deadline retains `default` only. Execution revalidates all completed arguments.
 
 ## 1.4 Workspace key / path rules
 
@@ -179,7 +217,7 @@ If the same Git branch is already checked out elsewhere, do not forcibly move it
 ```text
 new:      absent -> creating -> active
 park:     active -> parked         (MVP 1: metadata state only)
-switch:   parked -> active         (MVP 1: launch shell / print path)
+switch:   parked -> active         (MVP 1: current-shell handoff / explicit nested shell / print path)
 cleanup:  active|parked -> cleaning -> removed
 failure:  creating|cleaning -> attention_required (recoverable)
 ```
@@ -190,7 +228,7 @@ Keep `actual_status` (healthy/missing/conflict/error) independent of workspace `
 
 **Cleanup:** perform *all* preflight checks before any destructive step; show detailed itemized plan and blockers; on approval record intent; remove worktrees sequentially; confirm all removed; delete only recognized metadata and otherwise-empty workspace; remove registry entry last. If a later step fails, leave manifest/registry in `attention_required` and make the operation resumable.
 
-**Switch:** verify directory exists, mark active, then open a shell in the directory (or print path). `switch` never creates/moves worktrees; missing worktrees trigger warnings and an optional repair action.
+**Switch:** preflight the requested output mode, validate identity and destination under the workspace lock, then journal parked→active before publishing a current-shell handoff, explicitly opening a nested shell, or printing the path. `switch` never creates/moves/repairs worktrees; missing unselected worktrees trigger warnings, while an invalid selected target blocks activation. Lifecycle activation does not assert a shell is present at that path.
 
 ## 1.8 Persistence
 
@@ -286,7 +324,12 @@ Suggested keys: `n` new, `Enter` switch, `a` add repo, `p` park, `x` cleanup, `r
 - [ ] Refuse cleanup of staged, unstaged, untracked, ignored, unknown, or otherwise risky data without explicit review; no automatic `--force`.
 - [ ] Cleanup clean owned worktrees, preserve branches and all original source repositories, and remove the workspace and registry entry.
 - [ ] Simulate a failure halfway through create/cleanup and prove the operation can be inspected/resumed safely.
-- [ ] `switch --print-path` prints an absolute path only; no misleading parent-shell `cd` behavior.
+- [ ] `switch --print-path` prints an absolute path only and never updates shell history; `--shell` is an explicit nested-shell mode returning to unchanged parent cwd.
+- [ ] Bash/zsh integration navigates the same shell PID/cwd for explicit/picker/dashboard switching; uninitialized switching fails before activation, dashboard quit does not navigate, and terminal settings are restored.
+- [ ] Previous-workspace history toggles A→B→`-`, remains shell-local, honors manual cwd and same-workspace repository moves, rejects stale/reused identities, and preserves literal `switch -- -` compatibility.
+- [ ] Recorded repository navigation validates selectors and safe existing targets before activation without requiring a clean worktree or provisioning anything.
+- [ ] `new --switch` uses the actual edited creation result and navigates only on full-success Enter; cancellation/partial failure/late success and q/Esc/Ctrl-C never navigate; dashboard `n` stays embedded.
+- [ ] Context-aware Cobra completion covers the documented matrix, produces read-only local suggestions without state creation, and avoids fetch/hooks/unbounded discovery.
 - [ ] Tests use temporary Git repos and a fake Worktrunk executable; real Worktrunk integration is covered by a gated integration test.
 
 **MVP 1 completion gate:** A user can reliably manage local task directories and their worktrees without any external resource configuration.

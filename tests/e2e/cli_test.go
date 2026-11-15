@@ -226,6 +226,9 @@ func TestCLIEndToEnd(t *testing.T) {
 		if got := len(f.list()); got != 0 {
 			t.Fatalf("initial workspaces: %d", got)
 		}
+		if r := f.cli(nil, "new", "no-handoff", "--switch"); r.ExitCode == 0 || !strings.Contains(r.Stderr, "shell integration required") {
+			t.Fatalf("unintegrated new --switch: %+v", r)
+		}
 		for _, args := range [][]string{{"new", "zero", "--name", "title"}, {"cleanup", "zero"}, {"remove", "repo", "zero", "--repo", "anything"}} {
 			r := f.cli(nil, args...)
 			if r.ExitCode == 0 || !strings.Contains(r.Stderr, "interactive terminal") {
@@ -287,6 +290,26 @@ func TestCLIEndToEnd(t *testing.T) {
 			}
 		}
 		path := f.root + "/workspaces/feature"
+		// An executable cannot cd its caller. Without initialization it must
+		// explain setup, not implicitly nest a shell or activate the workspace.
+		if r := f.cli(nil, "switch", "feature"); r.ExitCode == 0 || !strings.Contains(r.Stderr, "shell integration required") {
+			t.Fatalf("unintegrated switch: %+v", r)
+		}
+		if state := f.inspect("feature")["state"]; state != "parked" {
+			t.Fatalf("unintegrated switch activated workspace: %v", state)
+		}
+		if r := f.cli(nil, "switch", "feature", "--repo", "missing", "--print-path"); r.ExitCode == 0 || r.Stdout != "" {
+			t.Fatalf("invalid recorded selector: %+v", r)
+		}
+		if state := f.inspect("feature")["state"]; state != "parked" {
+			t.Fatalf("invalid selector activated workspace: %v", state)
+		}
+		if r := f.cli(nil, "switch", "feature", "--shell", "--print-path"); r.ExitCode == 0 {
+			t.Fatal("accepted mutually exclusive navigation modes")
+		}
+		if out := f.must(f.cli(nil, "switch", "feature", "--repo", "one", "--print-path")); out != path+"/one\n" {
+			t.Fatalf("recorded worktree print-path: %q", out)
+		}
 		if out := f.must(f.cli(nil, "switch", "feature", "--print-path")); out != path+"\n" {
 			t.Fatalf("print-path: %q", out)
 		}
