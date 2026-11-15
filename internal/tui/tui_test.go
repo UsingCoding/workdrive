@@ -63,31 +63,20 @@ func TestWizardReviewDoesNotMutateUntilApproved(t *testing.T) {
 	defer s.Close()
 	ctx := context.Background()
 	w := newWizard(ctx, s, app.NewRequest{Key: "TASK-1", Name: "Test workspace"}, nil, "", "")
-	m, _ := w.Update(discovered{result: discovery.Result{}})
-	w = m.(wizard)
-	m, _ = w.Update(key("tab"))
-	w = m.(wizard)
-	m, _ = w.Update(key("tab"))
-	w = m.(wizard)
-	m, _ = w.Update(key("tab"))
-	w = m.(wizard)
-	m, scanCmd := w.Update(key("enter"))
-	w = m.(wizard)
+	scanCmd := w.goNext()
 	if scanCmd == nil {
 		t.Fatal("wizard did not schedule repository scan")
 	}
-	m, _ = w.Update(scanCmd())
+	m, _ := w.Update(scanCmd())
 	w = m.(wizard)
 	if w.step != 1 {
 		t.Fatalf("identity step: %d", w.step)
 	}
-	m, _ = w.Update(key("enter"))
-	w = m.(wizard)
+	w.goNext()
 	if w.step != 2 {
 		t.Fatalf("repo step: %d", w.step)
 	}
-	m, reviewCmd := w.Update(key("ctrl+n"))
-	w = m.(wizard)
+	reviewCmd := w.goNext()
 	if reviewCmd == nil {
 		t.Fatal("review preflight did not run asynchronously")
 	}
@@ -129,6 +118,7 @@ func TestWizardPrefillAndAmbiguousNames(t *testing.T) {
 	a := discovery.Repository{Name: "service", DisplayName: "service [one]", Path: filepath.Join(root, "one", "service")}
 	b := discovery.Repository{Name: "service", DisplayName: "service [two]", Path: filepath.Join(root, "two", "service")}
 	w := newWizard(context.Background(), s, app.NewRequest{Key: "TASK-2"}, []string{"service"}, "origin/main", "")
+	w.goNext()
 	m, _ := w.Update(discovered{result: discovery.Result{Repositories: []discovery.Repository{a, b}}})
 	w = m.(wizard)
 	if len(w.selected) != 0 || len(w.warnings) == 0 || !strings.Contains(w.warnings[0], "ambiguous") {
@@ -143,7 +133,8 @@ func TestWizardPrefillAndAmbiguousNames(t *testing.T) {
 }
 
 func TestWizardWaitsForPrefilledRepositoryScan(t *testing.T) {
-	w := wizard{step: 1, loading: true, prefill: []string{"api"}, selected: map[string]app.RepositoryChoice{}, existing: map[string]bool{}}
+	w := newWizard(context.Background(), nil, app.NewRequest{Key: "TASK-1"}, []string{"api"}, "", "")
+	w.step, w.loading, w.form = 1, true, nil
 	m, _ := w.Update(key("enter"))
 	w = m.(wizard)
 	if w.step != 1 {
@@ -155,7 +146,7 @@ func TestWizardWaitsForPrefilledRepositoryScan(t *testing.T) {
 	if len(w.selected) != 1 {
 		t.Fatalf("prefill missing after scan: %+v", w.selected)
 	}
-	m, _ = w.Update(key("enter"))
+	m, _ = w.Update(key("ctrl+n"))
 	w = m.(wizard)
 	if w.step != 2 {
 		t.Fatalf("wizard did not advance after scan: %d", w.step)
@@ -203,7 +194,7 @@ func TestBlockedCleanupCannotBeApproved(t *testing.T) {
 	}
 }
 
-func TestEmptyWizardEnterReachesReviewAndCancellation(t *testing.T) {
+func TestEmptyWizardReachesReviewAndCancellation(t *testing.T) {
 	root := t.TempDir()
 	cfg := config.Defaults()
 	cfg.Workspace.Root = filepath.Join(root, "workspaces")
@@ -214,12 +205,12 @@ func TestEmptyWizardEnterReachesReviewAndCancellation(t *testing.T) {
 	defer s.Close()
 	w := newWizard(context.Background(), s, app.NewRequest{Key: "CANCEL-1"}, nil, "", "")
 	w.step = 2
-	m, reviewCmd := w.Update(key("enter"))
-	w = m.(wizard)
+	w.loadEdits()
+	reviewCmd := w.goNext()
 	if reviewCmd == nil {
 		t.Fatal("review preflight did not run asynchronously")
 	}
-	m, _ = w.Update(reviewCmd())
+	m, _ := w.Update(reviewCmd())
 	w = m.(wizard)
 	if w.step != 3 || w.plan.Workspace == nil {
 		t.Fatalf("review not reached: %d %v", w.step, w.status)
@@ -282,30 +273,24 @@ func TestWizardSelectsTwoRepositoriesAndEditsBranchBaseDestination(t *testing.T)
 		t.Fatal(err)
 	}
 	w := newWizard(context.Background(), s, app.NewRequest{Key: "ISSUE-2"}, nil, "", "")
-	w.step = 1
+	w.goNext()
 	m, _ := w.Update(discovered{result: discovery.Result{Repositories: []discovery.Repository{{Name: "one", DisplayName: "one", Path: first}, {Name: "two", DisplayName: "two", Path: second}}}})
 	w = m.(wizard)
-	m, _ = w.Update(key("space"))
-	w = m.(wizard)
-	m, _ = w.Update(tea.KeyMsg{Type: tea.KeyDown})
-	w = m.(wizard)
-	m, _ = w.Update(key("space"))
-	w = m.(wizard)
+	w.draft.Repositories = []string{first, second}
+	w.goNext()
 	if len(w.choices()) != 2 {
 		t.Fatalf("selected %d repos", len(w.choices()))
 	}
-	m, _ = w.Update(key("enter"))
-	w = m.(wizard)
 	if w.step != 2 {
 		t.Fatalf("worktree editing step: %d", w.step)
 	}
-	w.edits[0].SetValue("issue-2-one")
-	w.edits[1].SetValue("main")
+	w.draft.Branch = "issue-2-one"
+	w.draft.Base = "main"
 	destination, err := config.CanonicalPath(filepath.Join(root, "workspaces", "ISSUE-2", "nested", "one"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.edits[2].SetValue(destination)
+	w.draft.Destination = destination
 	m, reviewCmd := w.Update(key("ctrl+n"))
 	w = m.(wizard)
 	if reviewCmd == nil {

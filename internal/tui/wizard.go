@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/huh"
 	"github.com/usingcoding/workdrive/internal/app"
 	"github.com/usingcoding/workdrive/internal/discovery"
 )
@@ -37,16 +38,16 @@ type wizard struct {
 	prefill        []string
 	defaultBase    string
 	step           int // 0 identity, 1 repositories, 2 worktrees, 3 review, 4 applying, 5 result
-	fields         []input
-	focus          int
-	search         input
+	draft          *wizardDraft
+	form           *huh.Form
+	identity       []*huh.Input
+	destination    *huh.Input
+	defaults       worktreeDefaults
 	repositories   []discovery.Repository
 	selected       map[string]app.RepositoryChoice
 	existing       map[string]bool
 	order          []string
-	cursor         int
 	editIndex      int
-	edits          []input
 	plan           app.Plan
 	loading        bool
 	warnings       []string
@@ -54,49 +55,41 @@ type wizard struct {
 	progress       int
 	err            error
 	done           bool
-	height         int
+	width, height  int
 }
 
-func field(label, value string) input {
-	t := newInput()
-	t.Prompt = label + ": "
-	t.SetValue(value)
-	t.CharLimit = 2048
-	return t
-}
 func newWizard(ctx context.Context, s *app.Service, req app.NewRequest, prefill []string, base, addKey string) wizard {
-	search := newInput()
-	search.Prompt = "Search repositories: "
-	search.Placeholder = "name or path"
-	w := wizard{ctx: ctx, service: s, request: req, initialChoices: append([]app.RepositoryChoice(nil), req.Repos...), prefill: prefill, defaultBase: base, addKey: addKey, selected: map[string]app.RepositoryChoice{}, existing: map[string]bool{}, height: 24, loading: addKey != "", search: search}
-	w.fields = []input{field("Key", req.Key), field("Name", req.Name), field("Path", req.Path), field("Profile", req.Profile)}
+	w := wizard{
+		ctx: ctx, service: s, request: req, initialChoices: append([]app.RepositoryChoice(nil), req.Repos...),
+		prefill: prefill, defaultBase: base, addKey: addKey, selected: map[string]app.RepositoryChoice{},
+		existing: map[string]bool{}, width: 80, height: 24,
+		draft: &wizardDraft{Key: req.Key, Name: req.Name, Path: req.Path, Profile: req.Profile},
+	}
 	if addKey != "" {
 		w.step = 1
+		w.loading = true
 		existing, err := s.Find(addKey)
 		if err != nil {
 			w.status = err.Error()
 		} else {
-			w.request.Profile = existing.Profile
+			w.request = app.NewRequest{Key: existing.Key, Name: existing.Name, Path: existing.Path, Profile: existing.Profile}
 			for _, r := range existing.Resources {
 				w.existing[r.Source] = true
 			}
 		}
+	} else {
+		w.form = w.identityForm()
 	}
-	w.fields[w.focus].Focus()
 	return w
 }
 func (w wizard) Init() tea.Cmd {
-	if w.step == 0 {
-		return nil
+	if w.step == 1 {
+		return w.scanWith(false)
 	}
-	return w.scan()
+	return w.form.Init()
 }
-func (w wizard) scan() tea.Cmd { return w.scanWith(false) }
 func (w wizard) scanWith(fresh bool) tea.Cmd {
 	profile := w.request.Profile
-	if w.step == 0 {
-		profile = strings.TrimSpace(w.fields[3].Value())
-	}
 	return func() tea.Msg {
 		if fresh {
 			return discovered{result: w.service.RefreshDiscovery(w.ctx, profile)}
@@ -105,12 +98,15 @@ func (w wizard) scanWith(fresh bool) tea.Cmd {
 	}
 }
 func (w *wizard) updateRequest() {
-	w.request.Key = strings.TrimSpace(w.fields[0].Value())
-	w.request.Name = strings.TrimSpace(w.fields[1].Value())
-	w.request.Path = strings.TrimSpace(w.fields[2].Value())
-	w.request.Profile = strings.TrimSpace(w.fields[3].Value())
+	if w.addKey != "" {
+		return
+	}
+	w.request.Key = strings.TrimSpace(w.draft.Key)
+	w.request.Name = strings.TrimSpace(w.draft.Name)
+	w.request.Path = strings.TrimSpace(w.draft.Path)
+	w.request.Profile = strings.TrimSpace(w.draft.Profile)
 }
-func (w *wizard) choices() []app.RepositoryChoice {
+func (w wizard) choices() []app.RepositoryChoice {
 	var choices []app.RepositoryChoice
 	for _, source := range w.order {
 		if c, ok := w.selected[source]; ok {
@@ -119,28 +115,27 @@ func (w *wizard) choices() []app.RepositoryChoice {
 	}
 	return choices
 }
-func (w *wizard) loadEdits() {
+func (w *wizard) loadEdits() tea.Cmd {
 	if w.editIndex >= len(w.order) {
 		w.editIndex = 0
 	}
-	if len(w.order) == 0 {
-		w.edits = nil
-		return
+	if len(w.order) > 0 {
+		c := w.selected[w.order[w.editIndex]]
+		w.draft.Branch, w.draft.Base, w.draft.Destination = c.Branch, c.Base, c.Path
+		w.defaults = w.repositoryDefaults()
 	}
-	c := w.selected[w.order[w.editIndex]]
-	w.edits = []input{field("Branch", c.Branch), field("Base", c.Base), field("Destination", c.Path)}
-	w.focus = 0
-	w.edits[0].Focus()
+	w.form = w.worktreeForm()
+	return w.form.Init()
 }
 func (w *wizard) saveEdits() {
-	if len(w.edits) == 0 || len(w.order) == 0 {
+	if len(w.order) == 0 {
 		return
 	}
 	source := w.order[w.editIndex]
 	c := w.selected[source]
-	c.Branch = strings.TrimSpace(w.edits[0].Value())
-	c.Base = strings.TrimSpace(w.edits[1].Value())
-	c.Path = strings.TrimSpace(w.edits[2].Value())
+	c.Branch = strings.TrimSpace(w.draft.Branch)
+	c.Base = strings.TrimSpace(w.draft.Base)
+	c.Path = strings.TrimSpace(w.draft.Destination)
 	w.selected[source] = c
 }
 func (w wizard) planCommand() tea.Cmd {
@@ -154,63 +149,95 @@ func (w wizard) planCommand() tea.Cmd {
 		return planned{plan: plan, err: err}
 	}
 }
-func (w wizard) visible() []discovery.Repository {
-	var out []discovery.Repository
-	q := w.search.Value()
-	for _, r := range w.repositories {
-		if w.existing[r.Path] {
-			continue
-		}
-		if matchQuery(r.DisplayName+" "+r.Path, q) {
-			out = append(out, r)
+func (w *wizard) syncChoices() {
+	wanted := make(map[string]bool, len(w.draft.Repositories))
+	for _, path := range w.draft.Repositories {
+		wanted[path] = true
+	}
+	var order []string
+	for _, path := range w.order {
+		if wanted[path] {
+			order = append(order, path)
+		} else {
+			delete(w.selected, path)
 		}
 	}
-	return out
+	w.order = order
+	for _, r := range w.repositories {
+		if wanted[r.Path] && !w.existing[r.Path] {
+			if _, ok := w.selected[r.Path]; !ok {
+				w.selectRepo(r.Path, app.RepositoryChoice{Source: r.Path, Name: r.Name, Base: w.defaultBase})
+			}
+		}
+	}
 }
-func (w *wizard) goNext() {
+func (w *wizard) goNext() tea.Cmd {
+	w.status = ""
 	switch w.step {
 	case 0:
 		w.updateRequest()
 		w.step = 1
-		w.search.Focus()
-		w.focus = 0
+		w.loading = true
+		w.form = nil
+		return w.scanWith(false)
 	case 1:
+		if w.loading {
+			w.status = "Wait for repository discovery to finish"
+			return nil
+		}
+		w.syncChoices()
+		if w.addKey != "" && len(w.order) == 0 {
+			w.status = "Select at least one new repository to add"
+			w.form = w.repositoryForm()
+			return w.form.Init()
+		}
 		w.step = 2
-		w.search.Blur()
-		w.loadEdits()
+		w.editIndex = 0
+		return w.loadEdits()
 	case 2:
-		w.step = 3
 		w.saveEdits()
+		w.step = 3
+		w.form = nil
 		w.updateRequest()
 		w.request.Repos = w.choices()
 		w.plan = app.Plan{}
 		w.status = "Checking workspace and Git state…"
+		return w.planCommand()
 	}
+	return nil
 }
-func (w *wizard) goBack() {
+func (w *wizard) goBack() tea.Cmd {
+	w.status = ""
 	switch w.step {
 	case 1:
 		if w.addKey == "" {
+			if !w.loading {
+				w.syncChoices()
+			}
 			w.step = 0
-			w.search.Blur()
-			w.focus = 0
-			w.fields[0].Focus()
+			w.loading = false
+			w.form = w.identityForm()
+			return w.form.Init()
 		}
 	case 2:
 		w.saveEdits()
 		w.step = 1
-		w.search.Focus()
+		w.form = w.repositoryForm()
+		return w.form.Init()
 	case 3:
 		w.step = 2
-		w.loadEdits()
+		return w.loadEdits()
 	}
+	return nil
 }
 func (w wizard) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
 	case tea.WindowSizeMsg:
-		w.height = msg.Height
-		return w, nil
+		w.resize(msg.Width, msg.Height)
 	case discovered:
+		if w.step != 1 {
+			return w, nil
+		}
 		w.loading = false
 		w.repositories = msg.result.Repositories
 		w.warnings = nil
@@ -218,7 +245,7 @@ func (w wizard) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			w.warnings = append(w.warnings, warning.Message)
 		}
 		for _, choice := range w.initialChoices {
-			if choice.Source != "" {
+			if choice.Source != "" && !w.existing[choice.Source] {
 				w.selectRepo(choice.Source, choice)
 			}
 		}
@@ -227,18 +254,19 @@ func (w wizard) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			r, err := discovery.Resolve(w.repositories, term)
 			if err != nil {
 				w.warnings = append(w.warnings, err.Error())
-				if strings.Contains(err.Error(), "ambiguous") && w.search.Value() == "" {
-					w.search.SetValue(term)
-				}
 				continue
 			}
-			w.selectRepo(r.Path, app.RepositoryChoice{Source: r.Path, Name: r.Name, Base: w.defaultBase})
+			if !w.existing[r.Path] {
+				w.selectRepo(r.Path, app.RepositoryChoice{Source: r.Path, Name: r.Name, Base: w.defaultBase})
+			}
 		}
 		w.prefill = nil
+		w.status = ""
 		if msg.err != nil {
 			w.status = msg.err.Error()
 		}
-		return w, nil
+		w.form = w.repositoryForm()
+		return w, w.form.Init()
 	case progressTick:
 		if w.step == 4 {
 			w.progress++
@@ -287,130 +315,40 @@ func (w wizard) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return w, nil
 		}
-		if k == "ctrl+r" {
+		if k == "ctrl+r" && w.step == 1 {
+			if !w.loading {
+				w.syncChoices()
+			}
 			w.loading = true
+			w.form = nil
 			return w, w.scanWith(true)
 		}
 		if k == "ctrl+b" {
-			w.goBack()
+			cmd := w.goBack()
+			return w, cmd
+		}
+		if w.step == 1 && w.loading {
+			if k == "enter" || k == "ctrl+n" || k == "tab" {
+				w.status = "Wait for repository discovery to finish"
+			}
 			return w, nil
 		}
-		switch w.step {
-		case 0:
-			if k == "tab" || k == "shift+tab" || k == "enter" {
-				w.fields[w.focus].Blur()
-				if k == "enter" && w.focus == 3 {
-					w.goNext()
-					w.loading = true
-					return w, w.scan()
-				}
-				if k == "shift+tab" {
-					w.focus = (w.focus + 3) % 4
-				} else {
-					w.focus = (w.focus + 1) % 4
-				}
-				w.fields[w.focus].Focus()
-				return w, nil
+		if k == "ctrl+n" && (w.step == 1 || w.step == 2) {
+			cmd := w.goNext()
+			return w, cmd
+		}
+		if w.step == 2 && (k == "alt+left" || k == "alt+right") && len(w.order) > 0 {
+			w.saveEdits()
+			if k == "alt+left" && w.editIndex > 0 {
+				w.editIndex--
+			} else if k == "alt+right" && w.editIndex+1 < len(w.order) {
+				w.editIndex++
 			}
-		case 1:
-			if k == "ctrl+n" || k == "tab" {
-				if w.loading {
-					w.status = "Wait for repository discovery to finish"
-					return w, nil
-				}
-				w.goNext()
-				return w, nil
-			}
-			if k == "up" || k == "ctrl+p" {
-				if w.cursor > 0 {
-					w.cursor--
-				}
-				return w, nil
-			}
-			if k == "down" || k == "ctrl+j" {
-				if w.cursor+1 < len(w.visible()) {
-					w.cursor++
-				}
-				return w, nil
-			}
-			if k == " " || k == "space" {
-				visible := w.visible()
-				if w.cursor < len(visible) {
-					r := visible[w.cursor]
-					if _, exists := w.selected[r.Path]; exists {
-						delete(w.selected, r.Path)
-						for i, p := range w.order {
-							if p == r.Path {
-								w.order = append(w.order[:i], w.order[i+1:]...)
-								break
-							}
-						}
-					} else {
-						w.selectRepo(r.Path, app.RepositoryChoice{Source: r.Path, Name: r.Name, Base: w.defaultBase})
-					}
-				}
-				return w, nil
-			}
-			if k == "enter" {
-				if w.loading {
-					w.status = "Wait for repository discovery to finish"
-					return w, nil
-				}
-				w.goNext()
-				return w, nil
-			}
-		case 2:
-			if k == "ctrl+n" || (k == "enter" && len(w.edits) == 0) {
-				w.goNext()
-				if w.addKey != "" && len(w.request.Repos) == 0 {
-					w.status = "Select at least one new repository to add"
-					return w, nil
-				}
-				return w, w.planCommand()
-			}
-			if k == "tab" || k == "shift+tab" || k == "enter" {
-				if len(w.edits) > 0 {
-					w.edits[w.focus].Blur()
-					if k == "enter" && w.focus == 2 {
-						w.saveEdits()
-						if w.editIndex+1 >= len(w.order) {
-							w.goNext()
-							return w, w.planCommand()
-						}
-						w.editIndex++
-						w.loadEdits()
-						return w, nil
-					}
-					if k == "shift+tab" {
-						w.focus = (w.focus + 2) % 3
-					} else {
-						w.focus = (w.focus + 1) % 3
-					}
-					w.edits[w.focus].Focus()
-				}
-				return w, nil
-			}
-			if k == "alt+left" {
-				w.saveEdits()
-				if w.editIndex > 0 {
-					w.editIndex--
-					w.loadEdits()
-				}
-				return w, nil
-			}
-			if k == "alt+right" {
-				w.saveEdits()
-				if w.editIndex+1 < len(w.order) {
-					w.editIndex++
-					w.loadEdits()
-				}
-				return w, nil
-			}
-		case 3:
-			if k == "enter" || k == "y" {
-				if w.plan.Workspace == nil || !w.plan.Safe() {
-					return w, nil
-				}
+			cmd := w.loadEdits()
+			return w, cmd
+		}
+		if w.step == 3 {
+			if (k == "enter" || k == "y") && w.plan.Workspace != nil && w.plan.Safe() {
 				w.step = 4
 				ctx, cancel := context.WithCancel(w.ctx)
 				w.cancel = cancel
@@ -426,29 +364,37 @@ func (w wizard) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				})
 			}
 			if k == "b" {
-				w.goBack()
-				return w, nil
+				cmd := w.goBack()
+				return w, cmd
 			}
+			return w, nil
 		}
 	}
-	var cmd tea.Cmd
-	switch w.step {
-	case 0:
-		w.fields[w.focus], cmd = w.fields[w.focus].Update(message)
-	case 1:
-		old := w.search.Value()
-		w.search, cmd = w.search.Update(message)
-		if old != w.search.Value() {
-			w.cursor = 0
+	if w.form == nil {
+		return w, nil
+	}
+	model, cmd := w.form.Update(message)
+	w.form = model.(*huh.Form)
+	if w.step == 0 {
+		w.updateIdentityHints()
+	}
+	if w.form.State == huh.StateCompleted {
+		if w.step == 2 && w.editIndex+1 < len(w.order) {
+			w.saveEdits()
+			w.editIndex++
+			cmd := w.loadEdits()
+			return w, cmd
 		}
-	case 2:
-		if len(w.edits) > 0 {
-			w.edits[w.focus], cmd = w.edits[w.focus].Update(message)
-		}
+		cmd := w.goNext()
+		return w, cmd
 	}
 	return w, cmd
 }
 func (w *wizard) selectRepo(path string, c app.RepositoryChoice) {
+	c.Source = path
+	if c.Name == "" {
+		c.Name = filepath.Base(path)
+	}
 	if _, found := w.selected[path]; !found {
 		w.order = append(w.order, path)
 	}
@@ -458,65 +404,17 @@ func (w wizard) View() string {
 	var b strings.Builder
 	labels := []string{"Identity", "Repositories", "Worktrees", "Review", "Applying", "Result"}
 	fmt.Fprintf(&b, "%s · %s\n\n", accentStyle.Render("Workdrive "+map[bool]string{true: "Add repositories", false: "New workspace"}[w.addKey != ""]), accentStyle.Render(labels[w.step]))
+	if w.form != nil {
+		b.WriteString(w.form.View() + "\n")
+	}
+	if w.loading {
+		b.WriteString(accentStyle.Render("Scanning local repositories…") + "\n")
+	}
 	switch w.step {
-	case 0:
-		for i, t := range w.fields {
-			marker := "  "
-			if i == w.focus {
-				marker = accentStyle.Render("> ")
-			}
-			fmt.Fprintf(&b, "%s%s\n", marker, t.View())
-		}
-		b.WriteString("\n" + helpLine("Tab next field · Enter on Profile continues"))
 	case 1:
-		fmt.Fprintf(&b, "%s · %d selected\n", w.search.View(), len(w.choices()))
-		if w.loading {
-			b.WriteString(accentStyle.Render("Scanning local repositories…") + "\n")
-		}
-		visible := w.visible()
-		if len(visible) == 0 {
-			b.WriteString("No matching repositories (zero repositories is allowed).\n")
-		}
-		limit := w.height - 10
-		if limit < 1 {
-			limit = 1
-		}
-		if limit > len(visible) {
-			limit = len(visible)
-		}
-		start := 0
-		if w.cursor >= limit {
-			start = w.cursor - limit + 1
-		}
-		for i := start; i < start+limit; i++ {
-			r := visible[i]
-			mark := " "
-			if _, ok := w.selected[r.Path]; ok {
-				mark = "x"
-			}
-			row := fmt.Sprintf("[%s] %s — %s", mark, r.DisplayName, r.Path)
-			if mark == "x" && i != w.cursor {
-				row = successStyle.Render(row)
-			}
-			b.WriteString(listRow(row, i == w.cursor) + "\n")
-		}
-		b.WriteString("\n" + helpLine("Space toggle · ↑/↓ move · Enter next · Ctrl+R refresh"))
+		b.WriteString(helpLine("Ctrl+N next · Ctrl+R refresh"))
 	case 2:
-		if len(w.order) == 0 {
-			b.WriteString("No worktrees selected. Press Enter to review the workspace.\n")
-		} else {
-			c := w.selected[w.order[w.editIndex]]
-			fmt.Fprintf(&b, "Repository %d/%d: %s\nSource: %s\n", w.editIndex+1, len(w.order), filepath.Base(c.Source), c.Source)
-			for i, t := range w.edits {
-				pointer := "  "
-				if w.focus == i {
-					pointer = accentStyle.Render("> ")
-				}
-				fmt.Fprintf(&b, "%s%s\n", pointer, t.View())
-			}
-			b.WriteString(mutedStyle.Render("Leave Branch / Destination empty for profile defaults. Base is a Git ref.") + "\n" + helpLine("Alt+←/→ previous/next repo · Enter on Destination next"))
-		}
-		b.WriteString(helpLine("Ctrl+N review"))
+		b.WriteString(helpLine("Alt+←/→ previous/next repo · Ctrl+N review"))
 	case 3:
 		if w.plan.Workspace != nil {
 			p := w.plan
@@ -574,10 +472,8 @@ func (w wizard) View() string {
 		}
 		fmt.Fprintf(&b, "\n%s\n", style.Render(w.status))
 	}
-	if len(w.warnings) > 0 {
-		for _, v := range w.warnings[:min(3, len(w.warnings))] {
-			fmt.Fprintf(&b, "%s\n", warningStyle.Render("Warning: "+v))
-		}
+	for _, v := range w.warnings[:min(3, len(w.warnings))] {
+		fmt.Fprintf(&b, "%s\n", warningStyle.Render("Warning: "+v))
 	}
 	b.WriteString(helpLine("Ctrl+B back · Esc cancel"))
 	return b.String()

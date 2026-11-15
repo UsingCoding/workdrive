@@ -33,6 +33,7 @@ func TestViewsPreserveTextAcrossColorProfiles(t *testing.T) {
 	repos.repositories = []discovery.Repository{{DisplayName: "api", Path: "/sources/api"}}
 	repos.selected = map[string]app.RepositoryChoice{"/sources/api": {Source: "/sources/api"}}
 	repos.order = []string{"/sources/api"}
+	repos.form = repos.repositoryForm()
 	views := []struct {
 		name  string
 		model interface{ View() string }

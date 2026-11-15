@@ -177,13 +177,9 @@ func (f *fixture) create(key string, repos ...string) result {
 	for _, repo := range repos {
 		args = append(args, "--repo", repo)
 	}
-	last := f.root + "/sources/discovery-fixture"
-	if len(repos) > 0 {
-		last = repos[len(repos)-1]
-	}
 	return f.cli([]action{
 		{Wait: "Identity", Send: "\t\t\t\r"},
-		{Wait: last, Send: "\x0e"},
+		{Wait: "Select repositories", Send: "\x0e"},
 		{Wait: "Worktrees", Send: "\x0e"},
 		{Wait: "Enter/y confirm and apply", Send: "y"},
 		{Wait: "Operation completed successfully", Send: "\r"},
@@ -240,7 +236,7 @@ func TestCLIEndToEnd(t *testing.T) {
 		f.seeded = true
 		f.must(f.cli([]action{
 			{Wait: "Identity", Send: "\t\t\t\r"},
-			{Wait: f.root + "/sources/discovery-fixture", Send: "\x0e"},
+			{Wait: "Select repositories", Send: "\x0e"},
 			{Wait: "Worktrees", Send: "\x0e"},
 			{Wait: "Enter/y confirm and apply", Send: "\x1b"},
 		}, "new", "zero"))
@@ -374,7 +370,7 @@ func TestCLIEndToEnd(t *testing.T) {
 		f.write(failure, "fail\n")
 		steps := []action{
 			{Wait: "Identity", Send: "\t\t\t\r"},
-			{Wait: two, Send: "\x0e"},
+			{Wait: "Select repositories", Send: "\x0e"},
 			{Wait: "Worktrees", Send: "\x0e"},
 			{Wait: "Enter/y confirm and apply", Send: "y"},
 			{Wait: "operation requires recovery:", Send: "\r"},

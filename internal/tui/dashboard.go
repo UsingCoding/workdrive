@@ -42,6 +42,7 @@ type dashboard struct {
 	inspected    *domain.Workspace
 	loading      bool
 	status       string
+	width        int
 	height       int
 	wizard       *wizard
 	pending      app.Plan
@@ -57,7 +58,7 @@ func newDashboard(ctx context.Context, s *app.Service) dashboard {
 	query := newInput()
 	query.Prompt = "Search: "
 	query.Placeholder = "key, title, path"
-	return dashboard{ctx: ctx, service: s, filter: "all", query: query, height: 24}
+	return dashboard{ctx: ctx, service: s, filter: "all", query: query, width: 80, height: 24}
 }
 func (d dashboard) Init() tea.Cmd { return d.load() }
 func (d dashboard) load() tea.Cmd {
@@ -112,6 +113,9 @@ func (d *dashboard) refreshCurrent() tea.Cmd {
 	}
 }
 func (d dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		d.width, d.height = size.Width, size.Height
+	}
 	if d.wizard != nil {
 		m, cmd := d.wizard.Update(msg)
 		w := m.(wizard)
@@ -125,7 +129,6 @@ func (d dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	switch v := msg.(type) {
 	case tea.WindowSizeMsg:
-		d.height = v.Height
 		return d, nil
 	case listed:
 		d.loading = false
@@ -295,6 +298,7 @@ func (d dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if k == "n" {
 			w := newWizard(d.ctx, d.service, app.NewRequest{}, nil, "", "")
+			w.resize(d.width, d.height)
 			d.wizard = &w
 			return d, w.Init()
 		}
@@ -321,6 +325,7 @@ func (d dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return d, nil
 		case "a":
 			wizard := newWizard(d.ctx, d.service, app.NewRequest{}, nil, "", w.Key)
+			wizard.resize(d.width, d.height)
 			d.wizard = &wizard
 			return d, wizard.Init()
 		case "p":
